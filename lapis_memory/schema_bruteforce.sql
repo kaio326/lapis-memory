@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS lapis_memory (
                     CHECK (importance >= 0.0 AND importance <= 10.0),
     decay_rate  REAL   NOT NULL DEFAULT 0.0
                     CHECK (decay_rate >= 0.0 AND decay_rate <= 1.0),
+    -- TRUE when the embedder client truncated the input before producing
+    -- the embedding (see config.embed_max_chars). Surfaced by `memo doctor`.
+    was_truncated BOOLEAN NOT NULL DEFAULT FALSE,
     fts         tsvector GENERATED ALWAYS AS
                     (to_tsvector('english',
                         coalesce(title, '') || ' ' || coalesce(body, '')))

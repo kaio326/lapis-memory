@@ -1,0 +1,76 @@
+# Standalone docker-compose for lapis-memory bench-only sidecars.
+#
+# This file is intentionally separate from the host project's
+# docker-compose.yml so that the embedding/rerank sidecars do not
+# pollute production deployments. Bring them up only when running
+# the eval harness:
+#
+#   cd lapis-memory
+#   docker compose -f eval/sidecars/docker-compose.yml up -d tei-embed
+#   docker compose -f eval/sidecars/docker-compose.yml logs -f tei-embed
+#   # wait for "Ready"
+#
+# Tear down:
+#   docker compose -f eval/sidecars/docker-compose.yml down
+#
+# GPU build (default): the host has the NVIDIA Container Toolkit and a
+# Turing-class GPU (RTX 2060, sm_75), so we use the `turing-1.5` image.
+# For other GPUs swap the tag: `:1.5` (Ampere/Ada default), `:hopper-1.5`
+# (H100). For CPU-only fallback, use `:cpu-1.5` and remove the
+# `deploy.resources` block.
+
+services:
+
+  # Phase 16.1 — bge-m3 embedder (works around the Ollama NaN bug).
+  # Native endpoint: POST http://127.0.0.1:8081/embed  {"inputs":"..."}
+  tei-embed:
+    image: ghcr.io/huggingface/text-embeddings-inference:turing-1.7
+    container_name: lapis-tei-embed
+    environment:
+      MODEL_ID: BAAI/bge-m3
+      DTYPE: float16
+      MAX_CLIENT_BATCH_SIZE: "32"
+      MAX_BATCH_TOKENS: "4096"
+    ports:
+      - "127.0.0.1:8081:80"
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 180s
+
+  # Phase 16.3 — bge-reranker-v2-m3 cross-encoder rerank.
+  # Native endpoint: POST http://127.0.0.1:8080/rerank
+  tei-reranker:
+    image: ghcr.io/huggingface/text-embeddings-inference:turing-1.7
+    container_name: lapis-tei-reranker
+    environment:
+      MODEL_ID: BAAI/bge-reranker-v2-m3
+      DTYPE: float16
+      MAX_CLIENT_BATCH_SIZE: "32"
+      MAX_BATCH_TOKENS: "4096"
+    ports:
+      - "127.0.0.1:8080:80"
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 180s

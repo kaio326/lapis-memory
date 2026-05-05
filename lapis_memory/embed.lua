@@ -63,13 +63,24 @@ local function http_embed(text)
 end
 
 --- Embed a text into a vector of floats.
+-- When cfg.embed_max_chars is set and `text` exceeds it, the text is
+-- truncated before being sent to the embedder. The third return value
+-- signals whether truncation happened so callers can record it.
 -- @param text string
 -- @return table|nil vector
 -- @return string|nil err
+-- @return boolean    truncated  true when the input was clipped to fit
 function M.embed(text)
     if not cfg then return nil, "embed: not configured (call setup() first)" end
     if type(text) ~= "string" or #text == 0 then
         return nil, "embed: text must be a non-empty string"
+    end
+
+    local truncated = false
+    local max_chars = tonumber(cfg.embed_max_chars)
+    if max_chars and max_chars > 0 and #text > max_chars then
+        text = text:sub(1, max_chars)
+        truncated = true
     end
 
     local vec, err
@@ -84,7 +95,7 @@ function M.embed(text)
         return nil, ("embed: dimension mismatch: got %d, expected %d")
             :format(#vec, cfg.embed_dim)
     end
-    return vec
+    return vec, nil, truncated
 end
 
 --- Format a Lua array of numbers as a pgvector literal: '[1.0,2.0,...]'

@@ -8,6 +8,13 @@
 This guide shows the recommended setup and the gotchas. Every path
 ends with the same `memory.setup({...})` snippet — pick one and paste.
 
+> **Don't want to read?** Run `memo init` from your project root. It
+> probes your host (GPU, Docker, Ollama, RAM), asks two questions
+> (multilingual? long rows?), and prints a ready-to-paste `setup({...})`
+> snippet tailored to your hardware. After ingesting some rows, run
+> `memo doctor` to verify the fit (truncation count, p95 row size,
+> backend scale).
+
 ---
 
 ## Why this matters
@@ -60,37 +67,67 @@ That's it. The library does a one-shot probe at startup; if Ollama is
 down or `embed_dim` is wrong, `setup()` fails fast with a clear error
 before the app accepts any writes.
 
-### Going further: `bge-m3` for multilingual / longer context
+### Going further: `bge-m3` via TEI sidecar (high-accuracy)
 
 `nomic-embed-text` is a great default but has two limits worth knowing:
 its **context window is ~2,048 tokens** (long sessions get truncated)
 and it is **English-tuned** (recall drops on non-English content).
 
-When either bites, swap the model — `lapis-memory` is embedder-agnostic
-and only needs `embedder_model` + `embed_dim` updated:
+[BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3) supports an
+**8,192-token context** (4× nomic) and **100+ languages**, and on
+LongMemEval it lifts **R@5 from 81.5% → 93.5% (+12 pp)** and
+**R@1 from 62% → 80% (+18 pp)** vs `nomic-embed-text` with no other
+code changes (Phase 16.1, n=200, see
+[`eval/results/longmemeval.md`](eval/results/longmemeval.md)).
+
+> **Don't run `bge-m3` on Ollama.** Ollama's `bge-m3` server returns
+> NaN embeddings on long inputs (issues #15582, #14657, #11856,
+> #9639, PR #14739). Use the
+> [text-embeddings-inference](https://github.com/huggingface/text-embeddings-inference)
+> sidecar instead — it honors the model and truncates correctly.
+
+#### 1. Run TEI
 
 ```bash
-docker exec -it ollama ollama pull bge-m3
+docker run -d --name lapis-tei-embed --gpus all \
+  -p 127.0.0.1:8081:80 \
+  -e MODEL_ID=BAAI/bge-m3 \
+  -e DTYPE=float16 \
+  -e MAX_BATCH_TOKENS=4096 \
+  ghcr.io/huggingface/text-embeddings-inference:1.7
 ```
+
+For Turing-class GPUs (RTX 2060 / Quadro RTX, sm_75) use
+`:turing-1.7`. For CPU-only hosts use `:cpu-1.7` and drop `--gpus`.
+Resident VRAM with fp16 is ~2 GB. A reference standalone compose is
+shipped at
+[`eval/sidecars/docker-compose.yml`](eval/sidecars/docker-compose.yml)
+and the operator notes are at
+[`eval/sidecars/tei.md`](eval/sidecars/tei.md).
+
+#### 2. Configure `lapis-memory`
 
 ```lua
 require("lapis_memory").setup({
-    -- ... same config as above ...
-    embedder_model = "bge-m3",
-    embed_dim      = 1024,                 -- bge-m3 dim, NOT 768
+    db_table         = "lapis_memory",
+    embedder_url     = "http://localhost:8081/embed",
+    embedder_adapter = "tei",
+    embedder_model   = "BAAI/bge-m3",
+    embed_dim        = 1024,                -- bge-m3 dim, NOT 768
+    auth_fn          = function(self) return your_auth_check(self) end,
 })
 ```
-
-[BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3) supports **8,192-token
-context** (4× nomic) and **100+ languages**, and is competitive with
-the best hosted embedders on retrieval benchmarks. Cost is the same
-(local), latency is ~2× nomic on the same GPU.
 
 > **Dim mismatch is fatal.** Switching from `nomic-embed-text` (768) to
 > `bge-m3` (1024) means existing rows have the wrong-sized vector.
 > Either start a fresh DB or re-embed every row with
 > `memory.maintenance.reembed_scope()`. The startup probe will catch
 > this before any new write goes in.
+
+> **Don't add a noop reranker on top of bge-m3.** With a strong
+> embedder the lexical token-overlap reranker shuffles good
+> candidates downward (Phase 16.1: R@1 −7.5 pp). Rerank only adds
+> value on top of weaker embedders like `nomic-embed-text`.
 
 ---
 
@@ -124,6 +161,7 @@ the path below documents its exact `setup()` shape.
 
 | Adapter   | Source                                         | Typical model + dim                         |
 |-----------|------------------------------------------------|---------------------------------------------|
+| TEI       | [`lapis_memory/adapters/tei.lua`](lapis_memory/adapters/tei.lua) | `BAAI/bge-m3` / 1024 (sidecar, see above)   |
 | Voyage    | [`lapis_memory/adapters/voyage.lua`](lapis_memory/adapters/voyage.lua)   | `voyage-3` / 1024                           |
 | Cohere    | [`lapis_memory/adapters/cohere.lua`](lapis_memory/adapters/cohere.lua)   | `embed-english-v3.0` / 1024                 |
 | Anthropic | [`lapis_memory/adapters/anthropic.lua`](lapis_memory/adapters/anthropic.lua) | placeholder (no first-party embedding API as of writing) |
@@ -151,6 +189,41 @@ setup() embed probe failed: HTTP 401: { "error": "invalid_api_key" }
 This catches the three classic foot-guns: wrong URL, wrong API key,
 wrong dim. Fail-fast in production; opt-out (`skip_embed_probe =
 true`) in offline tests.
+
+### Corpus health check (`memo doctor`)
+
+A second, **runtime** check looks at the corpus you've already written
+and asks: *does the embedder still fit the data?* Set
+`corpus_health_check = true` in `setup()` and the library runs one
+read-only aggregate query at boot, emitting `ngx.log(WARN)` lines when
+thresholds trip:
+
+- ≥ 1% of rows had their input truncated by the embedder client (see
+  `embed_max_chars` below) — switch to a larger-context embedder.
+- The brute-force backend is holding > 100k rows — install pgvector.
+
+The same query is exposed as `M.corpus_health_check()` and rendered as
+a structured report by `memo doctor`. Doctor exits non-zero (CI-friendly)
+when truncation exceeds 10%.
+
+### Per-embedder safe input length (`embed_max_chars`)
+
+Most embedders have a hard token-context limit (nomic-embed-text 2048;
+bge-m3 8192; OpenAI v3 8191). Sending a longer payload either errors
+or, worse, silently truncates without telling you. Setting
+`embed_max_chars = N` makes the library clip text to `N` characters
+*before* embedding and flag the row's `was_truncated` column so
+`memo doctor` can count them.
+
+| Embedder                  | Recommended `embed_max_chars` |
+|---------------------------|-------------------------------|
+| `nomic-embed-text`        | 6000                          |
+| `bge-m3` (TEI)            | 24000                         |
+| `text-embedding-3-*`      | 24000                         |
+| `voyage-3`                | 90000                         |
+| `embed-english-v3.0`      | 1500                          |
+
+`memo init` writes the right value into the snippet automatically.
 
 ---
 

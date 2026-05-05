@@ -6,3 +6,5 @@ eval/*.json
 *.swp
 *~
 .DS_Store
+*.src.rock
+*.rock

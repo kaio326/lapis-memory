@@ -85,7 +85,7 @@ end
 -- columns (e.g. importance/decay_rate from migration 002) are surfaced
 -- everywhere automatically.
 local RETURN_COLS = "id, scope, kind, title, body, tags, metadata, "
-    .. "importance, decay_rate, created_at, updated_at"
+    .. "importance, decay_rate, was_truncated, created_at, updated_at"
 
 -- Parse a temporal bound (`since` / `until_`) into a SQL literal expression.
 -- Accepts:
@@ -249,7 +249,7 @@ function M.write(args)
     if derr then return nil, derr end
     if decay_rate == nil then decay_rate = cfg.default_decay_rate or 0.0 end
 
-    local vec, err = embed.embed(title .. "\n" .. body)
+    local vec, err, truncated = embed.embed(title .. "\n" .. body)
     if not vec then return nil, err end
 
     -- Dedup pre-search. Per-call dedup_strategy="append" disables dedup
@@ -270,8 +270,8 @@ function M.write(args)
     end
 
     local sql = ([[
-        INSERT INTO %s (scope, kind, title, body, tags, metadata, embedding, importance, decay_rate)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO %s (scope, kind, title, body, tags, metadata, embedding, importance, decay_rate, was_truncated)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING %s
     ]]):format(
         tbl(),
@@ -284,6 +284,7 @@ function M.write(args)
         _embed_literal(vec),
         db.escape_literal(importance),
         db.escape_literal(decay_rate),
+        db.escape_literal(truncated and true or false),
         RETURN_COLS
     )
     local rows, qerr = db.query(sql)
@@ -339,7 +340,7 @@ function M.write_many(rows_in, opts)
                         results[i] = { row = nil, action = nil, error = derr }
                     else
                         if decay_rate == nil then decay_rate = cfg.default_decay_rate or 0.0 end
-                        local vec, eerr = embed.embed(title .. "\n" .. body)
+                        local vec, eerr, vtrunc = embed.embed(title .. "\n" .. body)
                         if not vec then
                             results[i] = { row = nil, action = nil, error = eerr }
                         else
@@ -376,6 +377,7 @@ function M.write_many(rows_in, opts)
                                     vec   = vec,
                                     importance = importance,
                                     decay_rate = decay_rate,
+                                    truncated  = vtrunc and true or false,
                                 }
                             end
                         end
@@ -398,7 +400,7 @@ function M.write_many(rows_in, opts)
         local values = {}
         for j = pos, last do
             local p = prepared[indices[j]]
-            values[#values + 1] = string.format("(%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            values[#values + 1] = string.format("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 db.escape_literal(p.scope),
                 db.escape_literal(p.kind),
                 db.escape_literal(p.title),
@@ -407,11 +409,12 @@ function M.write_many(rows_in, opts)
                 as_jsonb(p.meta),
                 _embed_literal(p.vec),
                 db.escape_literal(p.importance),
-                db.escape_literal(p.decay_rate)
+                db.escape_literal(p.decay_rate),
+                db.escape_literal(p.truncated and true or false)
             )
         end
         local sql = ([[
-            INSERT INTO %s (scope, kind, title, body, tags, metadata, embedding, importance, decay_rate)
+            INSERT INTO %s (scope, kind, title, body, tags, metadata, embedding, importance, decay_rate, was_truncated)
             VALUES %s
             RETURNING %s
         ]]):format(tbl(), table.concat(values, ", "), RETURN_COLS)
@@ -492,9 +495,10 @@ function M.update(id, patch)
     if patch.title or patch.body then
         local title = patch.title or existing.title
         local body  = patch.body  or existing.body
-        local vec, eerr = embed.embed(title .. "\n" .. body)
+        local vec, eerr, vtrunc = embed.embed(title .. "\n" .. body)
         if not vec then return nil, eerr end
         table.insert(fields, "embedding = " .. _embed_literal(vec))
+        table.insert(fields, "was_truncated = " .. db.escape_literal(vtrunc and true or false))
     end
 
     if #fields == 0 then return existing end

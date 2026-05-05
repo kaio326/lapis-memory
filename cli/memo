@@ -14,6 +14,8 @@
 #   memo delete  ID
 #   memo summarize [--scope S] [--dry-run] [--weight-threshold F] [--retention-days N]
 #   memo promote --from FROM_SCOPE --to TO_SCOPE [--delete-source] [--dry-run] [--limit N]
+#   memo init    [--non-interactive] [--multilingual] [--long] [--hosted] [--allow-hash] [--write PATH] [--root DIR]
+#   memo doctor  [--setup PATH] [--json]
 
 set -euo pipefail
 
@@ -23,7 +25,11 @@ if [[ -f "$HOME/.memorc" ]]; then
     source "$HOME/.memorc"
 fi
 
-: "${MEMO_URL:?MEMO_URL is not set}"
+# shellcheck disable=SC2034
+MEMO_URL_REQUIRED_DEFAULT=true
+if [[ -n "${MEMO_URL:-}" ]]; then
+    : # already set
+fi
 TOKEN_HEADER=()
 if [[ -n "${MEMO_TOKEN:-}" ]]; then
     TOKEN_HEADER=(-H "Authorization: Bearer ${MEMO_TOKEN}")
@@ -163,6 +169,32 @@ cmd_promote() {
         -d "$json" | jq .
 }
 
+# Find a Lua interpreter for local subcommands (init, doctor) that bypass
+# the HTTP API and load the library modules directly.
+find_lua() {
+    for cand in lua5.1 luajit lua5.3 lua5.4 lua; do
+        if command -v "$cand" >/dev/null; then echo "$cand"; return 0; fi
+    done
+    return 1
+}
+
+cmd_local_lua() {
+    local module="$1"; shift
+    local lua
+    if ! lua=$(find_lua); then
+        echo "memo: no Lua interpreter found (tried lua5.1, luajit, lua5.3, lua5.4, lua)" >&2
+        exit 1
+    fi
+    # Build a Lua array literal of string args. Each arg goes inside
+    # Lua long-bracket quotes ([==[...]==]) so embedded special chars
+    # (quotes, backslashes, brackets) do not need escaping.
+    local args=""
+    for a in "$@"; do
+        args+="[==[${a}]==],"
+    done
+    "$lua" -e "require('lapis_memory.cli.${module}').run({${args}})"
+}
+
 usage() {
     sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
@@ -170,6 +202,13 @@ usage() {
 
 [[ $# -lt 1 ]] && usage
 sub="$1"; shift
+
+# init/doctor are local subcommands and don't use MEMO_URL.
+case "$sub" in
+    init|doctor) ;;
+    *) : "${MEMO_URL:?MEMO_URL is not set}" ;;
+esac
+
 case "$sub" in
     write)  cmd_write  "$@" ;;
     search) cmd_search "$@" ;;
@@ -179,6 +218,8 @@ case "$sub" in
     delete) cmd_delete "$@" ;;
     summarize) cmd_summarize "$@" ;;
     promote) cmd_promote "$@" ;;
+    init)    cmd_local_lua init   "$@" ;;
+    doctor)  cmd_local_lua doctor "$@" ;;
     -h|--help|help) usage ;;
     *) echo "memo: unknown subcommand: $sub" >&2; usage ;;
 esac

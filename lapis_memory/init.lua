@@ -16,13 +16,25 @@ M.config = {
     db_table       = "lapis_memory",
     -- HTTP embedder config (used when embedder_local is nil):
     embedder_url   = nil,
-    embedder_adapter = "generic",          -- "generic" | "ollama" | "openai"
+    embedder_adapter = "generic",          -- "generic" | "ollama" | "openai" | "tei" | "voyage" | "cohere"
     embedder_headers = {},                 -- e.g. { Authorization = "Bearer ..." }
     -- In-process embedder (overrides HTTP when set):
     --   "hash" -> lapis_memory.embedders.hash  (pure Lua, zero deps)
     embedder_local = nil,
     embed_dim      = 384,
     embed_timeout_ms = 5000,
+    -- When set, embed.embed() truncates input to this many characters
+    -- before sending to the embedder, and flags the row's was_truncated
+    -- column. nil = no truncation (historical default). Recommended
+    -- values per embedder family are documented in EMBEDDERS.md and
+    -- printed by `memo init`.
+    embed_max_chars = nil,
+    -- When true, M.setup() runs M.corpus_health_check() once and emits
+    -- a single ngx.log(WARN) line per tripped threshold (truncation
+    -- ratio, embedder mismatch, scale outgrowing bruteforce). Failures
+    -- are silent (pcall) so a missing/empty table never blocks startup.
+    -- Operators can also call M.corpus_health_check() on demand.
+    corpus_health_check = false,
     -- When true, skip the startup embedder health check. Set this in
     -- offline tests / pgmoon-shim eval scripts where the embedder is
     -- mocked or unreachable. In production it should stay false.
@@ -123,7 +135,77 @@ function M.setup(opts)
         end
     end
 
+    if M.config.corpus_health_check then
+        -- Best-effort. Wrapped in pcall so a missing table on a fresh
+        -- install never blocks startup; the warnings are advisory only.
+        pcall(M.corpus_health_check)
+    end
+
     return M
+end
+
+-- ---------------------------------------------------------------------------
+-- Corpus health check
+--
+-- One read-only SELECT against the configured table. Computes a few
+-- aggregate stats and emits a WARN line per tripped threshold via
+-- ngx.log when running under OpenResty (no-op under plain Lua).
+--
+-- Returns a stats table { rows, p95_chars, avg_chars, truncated, warnings }
+-- so callers (memo doctor) can render it however they like.
+-- ---------------------------------------------------------------------------
+function M.corpus_health_check()
+    local db = require("lapis.db")
+    local table_ident = db.escape_identifier(M.config.db_table)
+    local rows, err = db.query(([[
+        SELECT
+            count(*)::int                          AS rows,
+            COALESCE(avg(length(title) + length(body)), 0)::int AS avg_chars,
+            COALESCE(percentile_disc(0.95)
+                WITHIN GROUP (ORDER BY length(title) + length(body)), 0)::int AS p95_chars,
+            COALESCE(max(length(title) + length(body)), 0)::int AS max_chars,
+            COALESCE(sum(CASE WHEN was_truncated THEN 1 ELSE 0 END), 0)::int AS truncated
+        FROM %s
+    ]]):format(table_ident))
+    if not rows then
+        return nil, "corpus_health_check: " .. tostring(err)
+    end
+    local stats = rows[1] or { rows = 0, avg_chars = 0, p95_chars = 0,
+                                max_chars = 0, truncated = 0 }
+    stats.warnings = {}
+
+    -- Threshold A: truncation ratio. Anything above 1% of rows being
+    -- truncated by the embedder client is a strong signal the embedder
+    -- context is too small for the workload.
+    if stats.rows > 0 and stats.truncated > 0 then
+        local ratio = stats.truncated / stats.rows
+        if ratio >= 0.01 then
+            local msg = ("lapis_memory: %d/%d rows (%.1f%%) were truncated " ..
+                "before embedding. Consider switching to a larger-context " ..
+                "embedder (run `memo init`) or lowering embed_max_chars.")
+                :format(stats.truncated, stats.rows, ratio * 100)
+            table.insert(stats.warnings, msg)
+            if type(ngx) == "table" and ngx.log and ngx.WARN then
+                ngx.log(ngx.WARN, msg)
+            end
+        end
+    end
+
+    -- Threshold B: bruteforce backend at scale. The brute-force path
+    -- holds candidates in Lua; comfortable up to ~50k rows per scope.
+    -- Above 100k total rows the warning fires regardless of scope shape.
+    if stats.rows > 100000 and store.backend() == "bruteforce" then
+        local msg = ("lapis_memory: %d rows on bruteforce backend " ..
+            "(no pgvector). Latency will degrade past ~50k rows. " ..
+            "Install pgvector and switch backend = \"pgvector\".")
+            :format(stats.rows)
+        table.insert(stats.warnings, msg)
+        if type(ngx) == "table" and ngx.log and ngx.WARN then
+            ngx.log(ngx.WARN, msg)
+        end
+    end
+
+    return stats
 end
 
 -- ---------------------------------------------------------------------------

@@ -1,10 +1,10 @@
 rockspec_format = "3.0"
 package = "lapis-memory"
-version = "0.1-1"
+version = "0.1.1-1"
 
 source = {
     url = "git+https://github.com/kaio326/lapis-memory.git",
-    tag = "v0.1",
+    tag = "v0.1.1",
 }
 
 description = {
@@ -18,26 +18,35 @@ description = {
           * Two backends: pgvector (recommended) or pure brute-force REAL[]
             (zero extension dependency).
           * Pluggable embedders: Ollama, OpenAI, Voyage, Cohere, DeepSeek,
-            Anthropic, generic HTTP, and a built-in pure-Lua "hash"
-            embedder with no external dependencies.
+            Anthropic, generic HTTP, TEI (Hugging Face text-embeddings-
+            inference), and a built-in pure-Lua "hash" embedder with no
+            external dependencies.
           * Pluggable rerankers (Ollama, OpenAI, cross-encoder via TEI).
           * Background summarizer + decay/importance scoring.
           * Knowledge-graph adjunct (lm_kg_facts) for currently-valid
             facts with temporal validity.
           * MCP server bundled (mcp/server.lua) so models can read/write
             memory directly through Model Context Protocol.
+          * `memo init` wizard: probes host (GPU, Docker, Ollama, RAM),
+            asks two questions, and prints a setup({}) snippet for the
+            best-fit embedder.
+          * `memo doctor`: corpus health report with truncation counts,
+            p95 row size, and backend scale warnings.
+          * was_truncated column: per-row flag when embed_max_chars clips
+            input before embedding; surfaced by memo doctor.
 
-        Benchmarks (R@10):
-          * LoCoMo: 82.5% (hash) / 86.6% (Ollama bge-m3).
-          * Salesforce ConvoMem: hash R@1 81.6% / MRR 0.885;
-            Ollama R@1 88.3% / MRR 0.921.
+        Benchmarks (R@10, LongMemEval):
+          * hash embedder:         81.5%
+          * nomic-embed-text:      83.0%
+          * bge-m3 via TEI (GPU):  93.5%  (+12 pp over nomic)
     ]],
     homepage   = "https://github.com/kaio326/lapis-memory",
     issues_url = "https://github.com/kaio326/lapis-memory/issues",
     license    = "MIT",
     maintainer = "Kaio Fernandes <contact@kaiofernandes.com>",
     labels     = { "memory", "agents", "ai", "embeddings", "pgvector",
-                   "rag", "lapis", "openresty", "postgresql", "mcp" },
+                   "rag", "lapis", "openresty", "postgresql", "mcp",
+                   "tei", "bge-m3" },
 }
 
 dependencies = {
@@ -45,8 +54,8 @@ dependencies = {
     "lapis >= 1.8.0",
     "lua-cjson >= 2.1.0",
     -- lua-resty-http is only needed when using an HTTP embedder
-    -- (Ollama / OpenAI / generic). The pure-Lua "hash" embedder works
-    -- without it. It is bundled with OpenResty by default.
+    -- (Ollama / OpenAI / TEI / generic). The pure-Lua "hash" embedder
+    -- works without it. It is bundled with OpenResty by default.
     "lua-resty-http >= 0.17",
 }
 
@@ -79,6 +88,11 @@ build = {
         ["lapis_memory.summarizers.noop"]   = "lapis_memory/summarizers/noop.lua",
         ["lapis_memory.summarizers.ollama"] = "lapis_memory/summarizers/ollama.lua",
         ["lapis_memory.summarizers.openai"] = "lapis_memory/summarizers/openai.lua",
+        -- CLI support modules (used by `memo init` and `memo doctor`)
+        ["lapis_memory.cli.recommend"]      = "lapis_memory/cli/recommend.lua",
+        ["lapis_memory.cli.probe"]          = "lapis_memory/cli/probe.lua",
+        ["lapis_memory.cli.init"]           = "lapis_memory/cli/init.lua",
+        ["lapis_memory.cli.doctor"]         = "lapis_memory/cli/doctor.lua",
     },
     install = {
         bin = { ["memo"] = "cli/memo" },
