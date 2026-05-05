@@ -49,7 +49,8 @@ services:
       start_period: 180s
 
   # Phase 16.3 — bge-reranker-v2-m3 cross-encoder rerank.
-  # Native endpoint: POST http://127.0.0.1:8080/rerank
+  # Native endpoint: POST http://127.0.0.1:8082/rerank
+  # (Port 8080 is reserved for the portfolio app container.)
   tei-reranker:
     image: ghcr.io/huggingface/text-embeddings-inference:turing-1.7
     container_name: lapis-tei-reranker
@@ -59,7 +60,7 @@ services:
       MAX_CLIENT_BATCH_SIZE: "32"
       MAX_BATCH_TOKENS: "4096"
     ports:
-      - "127.0.0.1:8080:80"
+      - "127.0.0.1:8082:80"
     restart: unless-stopped
     deploy:
       resources:

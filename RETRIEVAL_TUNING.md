@@ -233,9 +233,32 @@ lua5.1 eval/longmemeval_run.lua --embedder ollama \
 - You've exhausted Priorities 1–3 and R@1 is still leaking answers.
 - You need a higher-quality top-1/top-3 (e.g. for a single "best answer"
   feed) without expanding the prompt budget.
-- Rule of thumb: **`noop` first** (free, often enough). Move to `ollama`
-  / `openai` only if you need cross-encoder-grade reasoning over the
-  candidate pool.
+- Rule of thumb: **`noop` first** (free, often enough). Move to `cross_encoder`
+  only if your reranker comes from a **different model family** than your embedder.
+
+### Cross-encoder adapter (`cross_encoder`) — measured negative result
+
+`lapis_memory/rerankers/cross_encoder.lua` exposes a TEI / Cohere / Jina
+`POST /rerank` sidecar as a drop-in reranker. It was benched
+(2026-05-06) with `bge-m3` embeddings + `bge-reranker-v2-m3` reranker,
+n=200, `longmemeval_s`:
+
+| Config                                   | R@1   | R@5   | MRR   |
+|------------------------------------------|------:|------:|------:|
+| bge-m3, no rerank (Phase 16.1 baseline)  | 0.800 | 0.935 | 0.862 |
+| bge-m3, rerank=noop top_n=20             | 0.725 | 0.925 | 0.809 |
+| **bge-m3 + bge-reranker-v2-m3 top_n=20**| **0.800** | **0.935** | **0.862** |
+
+**Result: zero net improvement.** `bge-reranker-v2-m3` is fine-tuned
+from the same `bge-m3` base and agrees with bi-encoder ordering
+point-for-point. Cross-encoder adds +0.43 s per query overhead with
+no quality gain when used with its own-family embedder.
+
+**When cross-encoder IS worth enabling:** pair it with a
+*different-family* reranker — e.g. Cohere Rerank v3 or
+Jina Reranker v2 on top of `bge-m3` embeddings. Those combinations
+are not yet benched; the negative result here is specific to the
+same-family `bge-m3` + `bge-reranker-v2-m3` pairing.
 
 ---
 

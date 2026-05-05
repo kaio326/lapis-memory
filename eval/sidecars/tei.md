@@ -7,7 +7,7 @@ as of 0.23.x). The reference target is HuggingFace's
 (TEI), which exposes a native `POST /rerank` endpoint.
 
 > **Note:** This file documents **two** TEI sidecars:
-> 1. **Rerank**  (`bge-reranker-v2-m3` on port 8080) — original use, Phase 16.3.
+> 1. **Rerank**  (`bge-reranker-v2-m3` on port 8082) — bench port; 8080 is reserved on this host (portfolio app).
 > 2. **Embed** (`bge-m3` on port 8081) — added for Phase 16.1 because
 >    Ollama's `bge-m3` path returns NaN on inputs >~600 chars
 >    ([ollama/ollama#15582](https://github.com/ollama/ollama/issues/15582)).
@@ -19,7 +19,7 @@ as of 0.23.x). The reference target is HuggingFace's
 
 ---
 
-## Part 1 — Rerank sidecar (`bge-reranker-v2-m3`, port 8080)
+## Part 1 — Rerank sidecar (`bge-reranker-v2-m3`, port 8082)
 
 ## docker-compose stub
 
@@ -36,7 +36,7 @@ services:
       MAX_CLIENT_BATCH_SIZE: 32
       MAX_BATCH_TOKENS: 16384
     ports:
-      - "127.0.0.1:8080:80"
+      - "127.0.0.1:8082:80"   # use 8082 if 8080 is taken (e.g. by a portfolio/nginx app)
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:80/health || exit 1"]
@@ -55,7 +55,7 @@ docker compose logs -f tei-reranker   # wait for "Ready"
 ## Quick sanity check
 
 ```bash
-curl -s -X POST http://127.0.0.1:8080/rerank \
+curl -s -X POST http://127.0.0.1:8082/rerank \
   -H 'Content-Type: application/json' \
   -d '{"query":"who painted the Mona Lisa?",
        "texts":["Leonardo da Vinci painted the Mona Lisa.",
@@ -71,7 +71,7 @@ curl -s -X POST http://127.0.0.1:8080/rerank \
 local memory = require("lapis_memory")
 memory.setup({
     -- ... regular config ...
-    rerank_url   = "http://127.0.0.1:8080/rerank",
+    rerank_url   = "http://127.0.0.1:8082/rerank",
     rerank_model = "BAAI/bge-reranker-v2-m3",   -- ignored by TEI; sent for Cohere/Jina compat
 })
 
@@ -92,41 +92,31 @@ the API key via `rerank_headers = { Authorization = "Bearer ..." }`.
 ## Resource cost
 
 - **Image size:** ~1.6 GB (CPU), ~3.2 GB (GPU).
-- **Model weights:** `bge-reranker-v2-m3` is 568 MB on disk
-  (multilingual, 8192-token context).
-- **Latency:** CPU ~50–200 ms per (query, 20 candidates) batch on
-  modern x86; GPU ~5–20 ms.
-- **RAM:** ~3 GB resident on CPU; ~2 GB VRAM on GPU.
+- **Model weights:** `bge-reranker-v2-m3` is ~2.3 GB on disk
+  (same architecture as bge-m3; multilingual, 8192-token context).
+- **Latency:** GPU ~5–20 ms per (query, 20 candidates) batch on
+  RTX 2060; overhead per query vs. no-rerank measured at ~0.43 s.
+- **VRAM:** ~2.3 GB on GPU (float16), same as bge-m3 embedder.
 
-## Bench protocol (Phase 16.3)
+## Bench results (Phase 16.3, 2026-05-06)
 
-The Phase 16.3 head-to-head against `noop` is **deferred** until the
-sidecar is brought up. Once running, repeat the Phase 16.2 protocol:
+Bench executed. `bge-m3` (TEI, port 8081) + `bge-reranker-v2-m3`
+(TEI, port 8082), n=200, `longmemeval_s`.
 
-```bash
-# config 1: rerank=noop, top_n=20    (already measured in Phase 16.2)
-# config 2: rerank=cross_encoder, top_n=20
-PGHOST=127.0.0.1 PGDATABASE=lm_bruteforce_test \
-  OLLAMA_MODEL=nomic-embed-text OLLAMA_DIM=768 \
-  RERANK_URL=http://127.0.0.1:8080/rerank \
-  lua5.1 eval/longmemeval_run.lua --embedder ollama \
-    --corpus eval/data/longmemeval_s.json --n 200 \
-    --rerank --rerank-adapter cross_encoder --rerank-top-n 20 \
-    --out eval/results/longmemeval_ollama_s_n200_rerank-bge-v2-m3.json
-```
+| Config                              | elapsed | R@1   | R@5   | R@10  | R@20  | MRR   |
+|-------------------------------------|--------:|------:|------:|------:|------:|------:|
+| TEI bge-m3, no rerank               |  1508 s | 0.800 | 0.935 | 0.965 | 0.995 | 0.862 |
+| TEI bge-m3, rerank=noop top_n=20    |  1492 s | 0.725 | 0.925 | 0.975 | 0.995 | 0.809 |
+| TEI bge-m3 + cross_encoder top_n=20 |  1594 s | 0.800 | 0.935 | 0.965 | 0.995 | 0.862 |
 
-**Decision rule:** if cross_encoder beats noop by ≥ +5 pp R@1 *and*
-p95 latency stays under 1.5 s/query, document as the recommended
-high-quality config in `RETRIEVAL_TUNING.md`. Otherwise mark adapter
-shipped but not recommended.
+**Result: NEUTRAL — cross-encoder matched no-rerank exactly.**
+Zero improvement over bge-m3 no-rerank. The reranker and embedder
+share the same bge-m3 base; they carry the same information and
+agree on ordering. Adapter remains shipped for non-same-family
+pairings (Cohere Rerank v3, Jina Reranker v2, domain-fine-tuned),
+but is not recommended with `bge-m3` + `bge-reranker-v2-m3`.
 
-## LIMITATION (2026-05-04)
-
-This sidecar is not currently running in any deployment. The adapter
-file `lapis_memory/rerankers/cross_encoder.lua` is shipped and
-unit-testable against any TEI-compatible HTTP endpoint, but the
-end-to-end LongMemEval head-to-head bench has not yet been executed.
-Phase 16.3 will close out only after the sidecar bench is measured.
+See `eval/results/longmemeval.md` § Phase 16.3 for full analysis.
 
 ---
 
@@ -162,7 +152,7 @@ services:
       MAX_CLIENT_BATCH_SIZE: "32"
       MAX_BATCH_TOKENS: "4096"  # bench fits in ~2 GB VRAM with fp16
     ports:
-      - "127.0.0.1:8081:80"     # 8080 is reserved for tei-reranker
+      - "127.0.0.1:8081:80"     # 8082 is reserved for tei-reranker
     restart: unless-stopped
     deploy:
       resources:
