@@ -1,3 +1,4 @@
+rockspec_format = "3.0"
 package = "lapis-memory"
 version = "0.1-1"
 
@@ -7,17 +8,36 @@ source = {
 }
 
 description = {
-    summary  = "pgvector-backed agent memory store for Lapis / OpenResty",
+    summary  = "Persistent semantic memory for AI agents on Lapis / OpenResty (PostgreSQL + pgvector)",
     detailed = [[
-        lapis-memory is a drop-in persistent memory store for AI agents
-        running against any Lapis / OpenResty application. It uses
-        PostgreSQL + the pgvector extension for hybrid vector + full-text
-        search. Embeddings are computed by an external HTTP embedder
-        (Ollama, OpenAI, or the bundled Python sidecar), so the library
-        itself has no Python or ML dependencies.
+        lapis-memory is a persistent semantic memory store for AI agents
+        and conversational apps running on Lapis / OpenResty.
+
+        Features:
+          * Hybrid vector + full-text retrieval over PostgreSQL.
+          * Two backends: pgvector (recommended) or pure brute-force REAL[]
+            (zero extension dependency).
+          * Pluggable embedders: Ollama, OpenAI, Voyage, Cohere, DeepSeek,
+            Anthropic, generic HTTP, and a built-in pure-Lua "hash"
+            embedder with no external dependencies.
+          * Pluggable rerankers (Ollama, OpenAI, cross-encoder via TEI).
+          * Background summarizer + decay/importance scoring.
+          * Knowledge-graph adjunct (lm_kg_facts) for currently-valid
+            facts with temporal validity.
+          * MCP server bundled (mcp/server.lua) so models can read/write
+            memory directly through Model Context Protocol.
+
+        Benchmarks (R@10):
+          * LoCoMo: 82.5% (hash) / 86.6% (Ollama bge-m3).
+          * Salesforce ConvoMem: hash R@1 81.6% / MRR 0.885;
+            Ollama R@1 88.3% / MRR 0.921.
     ]],
-    homepage = "https://github.com/kaio326/lapis-memory",
-    license  = "MIT",
+    homepage   = "https://github.com/kaio326/lapis-memory",
+    issues_url = "https://github.com/kaio326/lapis-memory/issues",
+    license    = "MIT",
+    maintainer = "Kaio Fernandes <contact@kaiofernandes.com>",
+    labels     = { "memory", "agents", "ai", "embeddings", "pgvector",
+                   "rag", "lapis", "openresty", "postgresql", "mcp" },
 }
 
 dependencies = {
