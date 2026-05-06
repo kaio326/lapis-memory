@@ -29,7 +29,8 @@ local aes   = require("resty.aes")
 local rnd   = require("resty.random")
 local rstr  = require("resty.string")
 local cjson = require("cjson.safe")
-local http  = require("resty.http")
+-- resty.http is lazy-required inside execute_with_secret to avoid
+-- loading resty.http_connect outside of a request context in OpenResty.
 
 local M = {}
 
@@ -357,13 +358,13 @@ function M.execute_with_secret(name, opts)
     entry.used_count   = (entry.used_count or 0) + 1
     pcall(save_store, store)
 
-    local httpc, herr = http.new()
-    if not httpc then
+    local http, herr = require("resty.http").new()
+    if not http then
         return nil, "secrets: failed to create http client: " .. tostring(herr)
     end
-    httpc:set_timeout(tonumber(opts.timeout_ms) or 10000)
+    http:set_timeout(tonumber(opts.timeout_ms) or 10000)
 
-    local res, rerr = httpc:request_uri(url, {
+    local res, rerr = http:request_uri(url, {
         method  = method,
         headers = req_headers,
         body    = req_body,
