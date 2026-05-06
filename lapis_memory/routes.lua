@@ -219,6 +219,75 @@ function M.register(app, opts)
         if not rows then return json(400, { error = err }) end
         return json(200, { ok = true, results = rows })
     end)
+
+    -- ---------------------------------------------------------------
+    -- Secrets layer (lm_secrets)
+    -- All endpoints require secrets to be enabled (master key configured).
+    -- Values are NEVER returned in any response.
+    -- ---------------------------------------------------------------
+    local secrets_mod = require("lapis_memory.secrets")
+
+    -- GET /secrets — list secret names and metadata (no values)
+    app:get(prefix .. "/secrets", function(self)
+        local denied = authorise(self); if denied then return denied end
+        if not secrets_mod.enabled() then
+            return json(503, { error = "secrets: not configured (no master_key)" })
+        end
+        local rows = secrets_mod.list()
+        return json(200, { ok = true, secrets = rows })
+    end)
+
+    -- POST /secrets — create or update a secret
+    app:post(prefix .. "/secrets", function(self)
+        local denied = authorise(self); if denied then return denied end
+        local p = decode_body(self)
+        if not p.name or p.name == "" then
+            return json(400, { error = "name is required" })
+        end
+        if not p.value or p.value == "" then
+            return json(400, { error = "value is required" })
+        end
+        local row, err = secrets_mod.store(p.name, p.value, p.description)
+        if not row then return json(400, { error = err }) end
+        return json(200, { ok = true, secret = row })
+    end)
+
+    -- POST /secrets/:name/delete — permanently delete a secret
+    app:post(prefix .. "/secrets/:name/delete", function(self)
+        local denied = authorise(self); if denied then return denied end
+        local ok, err = secrets_mod.delete(self.params.name)
+        if not ok then
+            local status = (err and err:find("not found")) and 404 or 400
+            return json(status, { error = err })
+        end
+        return json(200, { ok = true })
+    end)
+
+    -- POST /secrets/:name/execute — execute HTTP request with secret substituted
+    app:post(prefix .. "/secrets/:name/execute", function(self)
+        local denied = authorise(self); if denied then return denied end
+        local p = decode_body(self)
+        if not p.url or p.url == "" then
+            return json(400, { error = "url is required" })
+        end
+        local headers = p.headers
+        if type(headers) == "string" then
+            -- Allow JSON-encoded headers from form posts
+            local decoded, derr = cjson.decode(headers)
+            if decoded then headers = decoded
+            else return json(400, { error = "headers must be a JSON object: " .. tostring(derr) })
+            end
+        end
+        local body, err = secrets_mod.execute_with_secret(self.params.name, {
+            url        = p.url,
+            method     = p.method,
+            headers    = headers,
+            body       = p.body,
+            timeout_ms = tonumber(p.timeout_ms),
+        })
+        if not body then return json(400, { error = err }) end
+        return json(200, { ok = true, response = body })
+    end)
 end
 
 return M

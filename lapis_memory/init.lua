@@ -6,6 +6,7 @@ local embed       = require("lapis_memory.embed")
 local routes      = require("lapis_memory.routes")
 local summarizer  = require("lapis_memory.summarizer")
 local rerank      = require("lapis_memory.rerank")
+local secrets     = require("lapis_memory.secrets")
 
 local M = {}
 
@@ -98,6 +99,15 @@ M.config = {
     -- Optional hook called for every API request before auth_fn.
     -- Use this to enforce CSRF, rate limits, etc.
     before_request = nil,
+    -- Secrets module (lapis_memory.secrets):
+    --   Key resolution order (first match wins):
+    --   1. master_key_path — path to a file with the hex key (Docker secret, env file)
+    --   2. master_key_env  — name of an env var holding the hex key
+    --   3. master_key      — explicit 64-hex-char key in config (CI / dev only)
+    --   When none is set, secrets are disabled; all other features work normally.
+    master_key_path = nil,
+    master_key_env  = nil,
+    master_key      = nil,
 }
 
 --- Configure the library. Must be called once at app startup.
@@ -117,6 +127,7 @@ function M.setup(opts)
     store.configure(M.config)
     summarizer.configure(M.config)
     rerank.configure(M.config)
+    secrets.configure(M.config)
 
     -- Fail-fast embedder health check. Skip for the `hash` embedder
     -- (cannot fail) and when callers explicitly opt out (offline tests,
@@ -260,15 +271,16 @@ M.get    = function(id)   return store.get(id) end
 M.update = function(id, patch) return store.update(id, patch) end
 M.delete = function(id)   return store.delete(id) end
 
-M.routes = routes
-M.web    = require("lapis_memory.web")
-M.embed  = embed
-M.store  = store
+M.routes  = routes
+M.web     = require("lapis_memory.web")
+M.embed   = embed
+M.store   = store
 M.summarizer = summarizer
-M.rerank = rerank
-M.hooks  = require("lapis_memory.hooks")
+M.rerank  = rerank
+M.hooks   = require("lapis_memory.hooks")
 M.tune_weights = require("lapis_memory.tune_weights")
-M.kg     = require("lapis_memory.kg")
+M.kg      = require("lapis_memory.kg")
+M.secrets = secrets
 
 --- Manual one-shot summariser cycle (no timer).
 M.summarize = function(opts) return summarizer.run(opts) end

@@ -217,6 +217,127 @@ That's it. You now have:
 
 ---
 
+## Secrets Management
+
+`lapis-memory` can store encrypted API keys and tokens server-side and
+inject them into HTTP requests without ever exposing the raw value to the
+LLM. This is the `lm_secrets` module, built on the `execute_with_secret`
+design principle.
+
+### Security model
+
+- Secrets are stored **AES-256-CBC encrypted** in the `lm_secrets` table.
+- The master key is **never persisted in the database**. It is held in
+  memory only while the server process is running.
+- `list_secrets` / `secret_list` returns names and metadata only — no values.
+- `execute_with_secret` / `secret_execute` substitutes `{secret}` in URL,
+  headers, and body **server-side**, makes the HTTP request, and returns
+  only the response body. The decrypted value never crosses the LLM context
+  boundary.
+- There is **no `get_secret` tool** — raw values cannot be retrieved
+  through the API.
+
+### Setup
+
+**1. Generate a master key**
+
+```bash
+openssl rand -hex 32        # → 64-char hex string
+```
+
+**2. Configure the key source (choose one)**
+
+```lua
+-- Option A — Docker secret (recommended for production)
+memory.setup({
+    embedder_local  = "hash",
+    auth_fn         = ...,
+    master_key_path = "/run/secrets/lm_master_key",
+})
+
+-- Option B — environment variable
+memory.setup({
+    embedder_local = "hash",
+    auth_fn        = ...,
+    master_key_env = "LM_MASTER_KEY",   -- name of the env var
+})
+
+-- Option C — explicit value (CI / dev only; never commit production keys)
+memory.setup({
+    embedder_local = "hash",
+    auth_fn        = ...,
+    master_key     = "abcdef0123456789...",   -- 64 hex chars
+})
+```
+
+Key resolution order: `master_key_path` → `master_key_env` → `master_key`.
+When none is set, secrets are **disabled** — all other lapis-memory features
+continue to work normally.
+
+**3. Apply the migration**
+
+```bash
+psql -d mydb < lapis_memory/migrations/005_lm_secrets.sql
+```
+
+### Usage (Lua API)
+
+```lua
+local memory = require("lapis_memory")
+
+-- Store a secret (value is encrypted before writing)
+memory.secrets.store("openai-key", "sk-...", "OpenAI API key")
+
+-- List secrets (names and metadata only — values never returned)
+local list = memory.secrets.list()
+
+-- Execute an HTTP request with {secret} substituted server-side
+local body, err = memory.secrets.execute_with_secret("openai-key", {
+    url     = "https://api.openai.com/v1/models",
+    method  = "GET",
+    headers = { Authorization = "Bearer {secret}" },
+})
+
+-- Delete a secret
+memory.secrets.delete("openai-key")
+
+-- Check if secrets are enabled
+if memory.secrets.enabled() then ... end
+```
+
+### Usage (MCP tools)
+
+When the server is running, four MCP tools are available:
+
+| Tool | Description |
+|------|-------------|
+| `secret_list` | List stored secrets (names + metadata only) |
+| `secret_store(name, value, description?)` | Store or replace an encrypted secret |
+| `secret_delete(name)` | Permanently delete a secret |
+| `secret_execute(name, url, method?, headers?, body?, timeout_ms?)` | HTTP request with `{secret}` substituted server-side |
+
+Example: store and use an OpenAI API key from Claude Desktop / Copilot Agent Mode:
+
+```
+# Store the key once (value never returned again)
+secret_store("openai", "sk-...", "OpenAI API key")
+
+# Use it — {secret} is substituted server-side, not in this prompt
+secret_execute("openai", "https://api.openai.com/v1/models",
+               headers={"Authorization": "Bearer {secret}"})
+```
+
+### HTTP API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/memory/secrets` | List secrets (no values) |
+| POST | `/api/memory/secrets` | Create / update a secret (`name`, `value`, optional `description`) |
+| POST | `/api/memory/secrets/:name/delete` | Delete a secret |
+| POST | `/api/memory/secrets/:name/execute` | Execute HTTP request with secret substituted |
+
+---
+
 ## Programmatic API
 
 ```lua

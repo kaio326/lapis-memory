@@ -361,6 +361,115 @@ Tools.memory_promote = {
 }
 
 -- ===========================================================================
+-- Secrets tools
+-- These tools manage encrypted API keys and other credentials stored server-
+-- side. The raw secret value is NEVER returned to the LLM; use
+-- secret_execute to make HTTP requests with it substituted server-side.
+-- ===========================================================================
+
+Tools.secret_list = {
+    description = "List all stored secrets (names and metadata only). "
+        .. "Secret VALUES are never returned. Use secret_store to add a secret, "
+        .. "secret_execute to use one, and secret_delete to remove one.",
+    inputSchema = {
+        type       = "object",
+        properties = {},
+    },
+    handler = function(_)
+        return http_request("GET", "/secrets", nil, nil)
+    end,
+}
+
+Tools.secret_store = {
+    description = "Store (create or replace) an encrypted secret by name. "
+        .. "The value is AES-256-CBC encrypted before writing; it can never "
+        .. "be retrieved — only used via secret_execute. Requires the server "
+        .. "to be configured with a master_key.",
+    inputSchema = {
+        type = "object",
+        properties = {
+            name = {
+                type        = "string",
+                description = "Unique identifier. Alphanumeric, hyphens, underscores, and dots; max 128 chars.",
+            },
+            value = {
+                type        = "string",
+                description = "The plaintext secret value (API key, token, password, …).",
+            },
+            description = {
+                type        = "string",
+                description = "Optional human-readable description (stored in plaintext alongside the ciphertext).",
+            },
+        },
+        required = { "name", "value" },
+    },
+    handler = function(args)
+        return http_request("POST", "/secrets", nil, args)
+    end,
+}
+
+Tools.secret_delete = {
+    description = "Permanently delete a stored secret by name.",
+    inputSchema = {
+        type = "object",
+        properties = {
+            name = { type = "string", description = "Secret name to delete." },
+        },
+        required = { "name" },
+    },
+    handler = function(args)
+        local name = tostring(args.name)
+        return http_request("POST", "/secrets/" .. name .. "/delete", nil, {})
+    end,
+}
+
+Tools.secret_execute = {
+    description = "Execute an HTTP request with a stored secret substituted "
+        .. "server-side. Write {secret} anywhere in the url, header values, "
+        .. "or body — the server replaces it with the decrypted value before "
+        .. "making the request. Only the response body is returned; the raw "
+        .. "secret NEVER appears in the tool result.",
+    inputSchema = {
+        type = "object",
+        properties = {
+            name = {
+                type        = "string",
+                description = "Secret name to use.",
+            },
+            url = {
+                type        = "string",
+                description = "Request URL. May contain {secret}, e.g. 'https://api.example.com/data?key={secret}'.",
+            },
+            method = {
+                type        = "string",
+                enum        = { "GET", "POST", "PUT", "PATCH", "DELETE" },
+                description = "HTTP method (default GET).",
+            },
+            headers = {
+                type        = "object",
+                description = "Header map. Any value may contain {secret}, e.g. { Authorization = 'Bearer {secret}' }.",
+            },
+            body = {
+                type        = "string",
+                description = "Request body. May contain {secret}.",
+            },
+            timeout_ms = {
+                type        = "integer",
+                description = "Request timeout in milliseconds (default 10000).",
+                minimum     = 100,
+                maximum     = 120000,
+            },
+        },
+        required = { "name", "url" },
+    },
+    handler = function(args)
+        local name = tostring(args.name)
+        args.name  = nil
+        return http_request("POST", "/secrets/" .. name .. "/execute", nil, args)
+    end,
+}
+
+-- ===========================================================================
 -- JSON-RPC framing
 -- ===========================================================================
 local function send(msg)

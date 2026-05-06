@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **Secrets management** (`lapis_memory.secrets`): encrypted API-key storage
+  with the `execute_with_secret` design principle. Secrets are AES-256-CBC
+  encrypted at rest with a master key that is never persisted in the database.
+  `execute_with_secret` substitutes `{secret}` server-side in HTTP request
+  URLs, headers, and bodies — the raw value never crosses the LLM context
+  boundary. There is no `get_secret` API.
+  - Key resolution: `master_key_path` (file/Docker secret) →
+    `master_key_env` (env var name) → `master_key` (explicit in config).
+    No key = secrets disabled; all other features work normally.
+  - Lua API: `M.secrets.store()`, `M.secrets.list()`,
+    `M.secrets.delete()`, `M.secrets.execute_with_secret()`,
+    `M.secrets.enabled()`. Re-exported as `memory.secrets.*`.
+  - HTTP routes: `GET /secrets`, `POST /secrets`,
+    `POST /secrets/:name/delete`, `POST /secrets/:name/execute`.
+  - MCP tools: `secret_list`, `secret_store`, `secret_delete`,
+    `secret_execute` — all bridging to the HTTP routes.
+  - Migration `005_lm_secrets.sql` adds the `lm_secrets` table.
+  - Documented in README "Secrets Management" section.
+
 - **Web UI (read-only)**: new sub-app `lapis_memory.web` mountable via
   `memory.web.register(app, { prefix = "/memory/ui" })`. Pure-Lua HTML
   rendering (no etlua dependency on the host), inline CSS, paginated
