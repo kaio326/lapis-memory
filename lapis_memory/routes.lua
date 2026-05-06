@@ -231,7 +231,7 @@ function M.register(app, opts)
     app:get(prefix .. "/secrets", function(self)
         local denied = authorise(self); if denied then return denied end
         if not secrets_mod.enabled() then
-            return json(503, { error = "secrets: not configured (no master_key)" })
+            return json(503, { error = "secrets: not configured (secrets_file or master_key not set)" })
         end
         local rows = secrets_mod.list()
         return json(200, { ok = true, secrets = rows })

@@ -1,36 +1,41 @@
 -- lapis_memory/secrets.lua
 -- Encrypted secret storage for lapis-memory.
 --
--- Secrets are stored AES-256-CBC encrypted at rest. The master key is NEVER
--- persisted in the database and NEVER returned to callers. The canonical
--- usage pattern is execute_with_secret(), which substitutes the decrypted
--- value server-side into HTTP requests without leaking it to the LLM.
+-- Secrets are stored AES-256-CBC encrypted in a local JSON file.
+-- No database table is required — the file is the store.
 --
--- Key resolution order (first match wins):
---   1. master_key_path  — path to a file containing the hex-encoded key
---                         (recommended; use a Docker secret or env file)
---   2. master_key_env   — name of an environment variable holding the key
---   3. master_key       — explicit key string in setup() config
+-- Activation: set config.secrets_file to a writable path.
+-- If secrets_file is not configured, all write operations return a
+-- graceful error and execute_with_secret is disabled.  The rest of
+-- lapis-memory works normally.
+--
+-- File format: { "v": 1, "secrets": { [name]: { ciphertext, description,
+--   created_at, updated_at, last_used_at, used_count } } }
+-- Writes are atomic: write to <path>.tmp then os.rename().
+--
+-- Master key resolution order (first match wins):
+--   1. master_key_path  -- path to a file containing the hex-encoded key
+--                          (recommended; use a Docker secret or env file)
+--   2. master_key_env   -- name of an environment variable holding the key
+--   3. master_key       -- explicit key string in setup() config
 --
 -- Key format: 64 hex chars (= 32 bytes).  Generate with:
 --   openssl rand -hex 32
 --
--- When no key source is configured, secrets are "disabled": all write
--- operations return an error; list() returns an empty table; enabled()
--- returns false. The rest of lapis-memory works normally.
+-- When neither key nor file path is configured, all write operations return
+-- an error; list() returns an empty table; enabled() returns false.
 
-local aes  = require("resty.aes")
-local rnd  = require("resty.random")
-local rstr = require("resty.string")
-local db   = require("lapis.db")
-
--- lua-resty-http is always available in OpenResty / lapis environments.
-local http = require("resty.http")
+local aes   = require("resty.aes")
+local rnd   = require("resty.random")
+local rstr  = require("resty.string")
+local cjson = require("cjson.safe")
+local http  = require("resty.http")
 
 local M = {}
 
--- Internal: resolved 32-byte binary key, nil when not configured.
-local _key = nil
+-- Internal state: resolved 32-byte binary key and file path.
+local _key       = nil
+local _file_path = nil
 
 -- ---------------------------------------------------------------------------
 -- Internal helpers
@@ -42,7 +47,7 @@ local function from_hex(s)
     end))
 end
 
-local function read_file(path)
+local function _read_file(path)
     local f = io.open(path, "r")
     if not f then return nil end
     local s = f:read("*all")
@@ -54,12 +59,12 @@ end
 -- Accepts: 64-char hex string OR a raw 32-byte string.
 local function parse_key(raw)
     if not raw then return nil, "nil key" end
-    raw = raw:gsub("%s+", "")          -- strip whitespace / trailing newline
+    raw = raw:gsub("%s+", "")
     if #raw == 64 and raw:match("^%x+$") then
-        return from_hex(raw), nil      -- hex-encoded 32-byte key
+        return from_hex(raw), nil
     end
     if #raw == 32 then
-        return raw, nil                -- raw 32-byte key
+        return raw, nil
     end
     return nil, ("master key must be 32 bytes (raw) or 64 hex chars, got %d chars"):format(#raw)
 end
@@ -71,6 +76,47 @@ local function _log_warn(msg)
 end
 
 -- ---------------------------------------------------------------------------
+-- File-based store helpers
+-- ---------------------------------------------------------------------------
+
+-- Read and parse the JSON store file.
+-- Returns an empty store when the file does not yet exist.
+local function load_store()
+    if not _file_path then
+        return nil, "secrets: secrets_file not configured"
+    end
+    local raw = _read_file(_file_path)
+    if not raw then
+        return { v = 1, secrets = {} }
+    end
+    local store, err = cjson.decode(raw)
+    if not store then
+        return nil, "secrets: corrupt store file: " .. tostring(err)
+    end
+    store.secrets = store.secrets or {}
+    return store
+end
+
+-- Atomic write: write to <path>.tmp then os.rename() into place.
+local function save_store(store)
+    if not _file_path then
+        return nil, "secrets: secrets_file not configured"
+    end
+    local data, err = cjson.encode(store)
+    if not data then return nil, "secrets: json encode failed: " .. tostring(err) end
+    local tmp = _file_path .. ".tmp"
+    local f = io.open(tmp, "w")
+    if not f then return nil, "secrets: cannot write to " .. tmp end
+    f:write(data)
+    f:close()
+    local ok = os.rename(tmp, _file_path)
+    if not ok then
+        return nil, "secrets: rename failed (" .. tmp .. " -> " .. _file_path .. ")"
+    end
+    return true
+end
+
+-- ---------------------------------------------------------------------------
 -- configure (called from init.lua setup())
 -- ---------------------------------------------------------------------------
 
@@ -78,12 +124,12 @@ end
 --- Safe to call multiple times; the last successful key source wins.
 --- @param config table  The global lapis_memory config table.
 function M.configure(config)
-    config = config or {}
-    _key   = nil   -- reset on every configure so setup() can re-run cleanly
+    config     = config or {}
+    _key       = nil
+    _file_path = config.secrets_file or nil
 
-    -- Priority 1: file path (Docker secret, env file, …)
     if config.master_key_path then
-        local raw = read_file(config.master_key_path)
+        local raw = _read_file(config.master_key_path)
         if raw then
             local k, err = parse_key(raw)
             if k then _key = k; return end
@@ -91,7 +137,6 @@ function M.configure(config)
         end
     end
 
-    -- Priority 2: env var (name, not value)
     if config.master_key_env then
         local raw = os.getenv(config.master_key_env)
         if raw then
@@ -101,26 +146,21 @@ function M.configure(config)
         end
     end
 
-    -- Priority 3: explicit value in config (CI / dev only — not for prod)
     if config.master_key then
         local k, err = parse_key(config.master_key)
         if k then _key = k; return end
         _log_warn("master_key invalid: " .. err)
     end
-
-    -- No key configured — secrets disabled.
 end
 
---- Returns true when a master key was successfully resolved.
---- Routes + MCP tools check this before any operation.
+--- Returns true when both a master key and a secrets file path are configured.
 function M.enabled()
-    return _key ~= nil
+    return _key ~= nil and _file_path ~= nil
 end
 
 -- ---------------------------------------------------------------------------
 -- Encryption / decryption
--- AES-256-CBC with a random 8-byte salt per encryption (via EVP_BytesToKey,
--- matching the pattern used in helpers/sin_crypto.lua in the portfolio).
+-- AES-256-CBC with a random 8-byte salt per encryption.
 -- Stored format: "<16-char salt_hex>:<ciphertext_hex>"
 -- ---------------------------------------------------------------------------
 
@@ -163,11 +203,14 @@ end
 -- Validation
 -- ---------------------------------------------------------------------------
 
---- Name validation: alphanumeric, hyphens, underscores, dots; max 128 chars.
 local function valid_name(name)
     if type(name) ~= "string" or name == "" then return false end
     if #name > 128 then return false end
     return name:match("^[%w%.%-_]+$") ~= nil
+end
+
+local function now_iso()
+    return os.date("!%Y-%m-%dT%H:%M:%SZ")
 end
 
 -- ---------------------------------------------------------------------------
@@ -175,15 +218,16 @@ end
 -- ---------------------------------------------------------------------------
 
 --- Store (create or update) a secret by name.
---- The value is encrypted before writing; the plaintext is never persisted.
----
 --- @param name        string   Unique secret identifier
 --- @param value       string   Plaintext secret value
 --- @param description string?  Optional human-readable description
---- @return table|nil  Row: {id, name, description, created_at, updated_at, last_used_at, used_count}
+--- @return table|nil  {name, description, created_at, updated_at}
 --- @return string|nil Error message
 function M.store(name, value, description)
-    if not M.enabled() then
+    if not _file_path then
+        return nil, "secrets: not configured (secrets_file not set)"
+    end
+    if not _key then
         return nil, "secrets: not configured (no master_key)"
     end
     if not valid_name(name) then
@@ -193,64 +237,78 @@ function M.store(name, value, description)
         return nil, "secrets: value must be a non-empty string"
     end
 
-    local ciphertext, err = _encrypt(value)
-    if not ciphertext then return nil, err end
+    local ciphertext, cerr = _encrypt(value)
+    if not ciphertext then return nil, cerr end
 
-    local rows, qerr = db.query([[
-        INSERT INTO lm_secrets (name, ciphertext, description)
-        VALUES (?, ?, ?)
-        ON CONFLICT (name) DO UPDATE
-            SET ciphertext  = EXCLUDED.ciphertext,
-                description = COALESCE(EXCLUDED.description, lm_secrets.description),
-                updated_at  = now()
-        RETURNING id, name, description, created_at, updated_at,
-                  last_used_at, used_count
-    ]], name, ciphertext, description or db.NULL)
+    local store, serr = load_store()
+    if not store then return nil, serr end
 
-    if not rows then return nil, "secrets: db error: " .. tostring(qerr) end
-    return rows[1]
+    local now      = now_iso()
+    local existing = store.secrets[name]
+
+    store.secrets[name] = {
+        ciphertext   = ciphertext,
+        description  = description or (existing and existing.description) or cjson.null,
+        created_at   = (existing and existing.created_at) or now,
+        updated_at   = now,
+        last_used_at = (existing and existing.last_used_at) or cjson.null,
+        used_count   = (existing and existing.used_count)  or 0,
+    }
+
+    local ok, werr = save_store(store)
+    if not ok then return nil, werr end
+
+    local s = store.secrets[name]
+    return { name = name, description = s.description,
+             created_at = s.created_at, updated_at = s.updated_at }
 end
 
 --- Permanently delete a secret.
----
 --- @param name  string  Secret name
 --- @return bool   true on success
---- @return string|nil  Error message ("not found" or DB error)
+--- @return string|nil  Error message
 function M.delete(name)
-    if not M.enabled() then
-        return nil, "secrets: not configured (no master_key)"
-    end
+    if not M.enabled() then return nil, "secrets: not configured" end
     if not valid_name(name) then return nil, "secrets: invalid name" end
 
-    local rows, err = db.query(
-        "DELETE FROM lm_secrets WHERE name = ? RETURNING id", name)
-    if not rows then return false, "secrets: db error: " .. tostring(err) end
-    if #rows == 0 then return false, "secrets: not found: " .. name end
+    local store, err = load_store()
+    if not store then return false, err end
+
+    if not store.secrets[name] then
+        return false, "secrets: not found: " .. name
+    end
+
+    store.secrets[name] = nil
+
+    local ok, werr = save_store(store)
+    if not ok then return false, werr end
     return true
 end
 
---- List all secrets.  Returns names and metadata ONLY — values are never
---- included in the response.
----
---- @return table[]  {id, name, description, created_at, updated_at, last_used_at, used_count}[]
+--- List all secrets.  Returns names and metadata — values are never included.
+--- @return table[]  {name, description, created_at, updated_at, last_used_at, used_count}[]
 function M.list()
-    if not M.enabled() then return {} end
-
-    local rows = db.query([[
-        SELECT id, name, description, created_at, updated_at,
-               last_used_at, used_count
-        FROM lm_secrets
-        ORDER BY name ASC
-    ]])
-    return rows or {}
+    local store = load_store()
+    if not store then return {} end
+    local out = {}
+    for name, s in pairs(store.secrets) do
+        table.insert(out, {
+            name         = name,
+            description  = s.description,
+            created_at   = s.created_at,
+            updated_at   = s.updated_at,
+            last_used_at = s.last_used_at,
+            used_count   = s.used_count,
+        })
+    end
+    table.sort(out, function(a, b) return a.name < b.name end)
+    return out
 end
 
 -- ---------------------------------------------------------------------------
 -- execute_with_secret
--- ---------------------------------------------------------------------------
--- Substitutes {secret} in a URL / headers / body template server-side, makes
--- the HTTP request, and returns only the response body.  The decrypted value
--- is held in a local variable that does not cross the LLM context boundary.
+-- Substitutes {secret} in URL / headers / body server-side and makes the
+-- HTTP request.  The decrypted value never leaves this function.
 -- ---------------------------------------------------------------------------
 
 local function _substitute(template, secret_value)
@@ -259,47 +317,29 @@ local function _substitute(template, secret_value)
 end
 
 --- Execute an HTTP request with the secret substituted server-side.
---- {secret} is replaced in url, header values, and body — never returned.
----
 --- @param name  string  Secret name to look up
---- @param opts  table   {
----   url        string   Request URL (may contain {secret})
----   method     string?  HTTP verb; default "GET"
----   headers    table?   Header map; any value may contain {secret}
----   body       string?  Request body; may contain {secret}
----   timeout_ms number?  Request timeout in ms; default 10000
---- }
---- @return string|nil  Response body (raw string)
+--- @param opts  table   { url, method?, headers?, body?, timeout_ms? }
+--- @return string|nil  Response body
 --- @return string|nil  Error message
 function M.execute_with_secret(name, opts)
-    if not M.enabled() then
-        return nil, "secrets: not configured (no master_key)"
-    end
-    if not valid_name(name) then
-        return nil, "secrets: invalid name"
-    end
+    if not M.enabled() then return nil, "secrets: not configured" end
+    if not valid_name(name) then return nil, "secrets: invalid name" end
     opts = opts or {}
     if type(opts.url) ~= "string" or opts.url == "" then
         return nil, "secrets: execute_with_secret requires opts.url"
     end
 
-    -- Fetch ciphertext from DB.
-    local rows, qerr = db.query(
-        "SELECT ciphertext FROM lm_secrets WHERE name = ?", name)
-    if not rows then
-        return nil, "secrets: db error: " .. tostring(qerr)
-    end
-    if #rows == 0 then
-        return nil, "secrets: not found: " .. name
-    end
+    local store, serr = load_store()
+    if not store then return nil, serr end
 
-    -- Decrypt.  value is a local — it does not leave this function.
-    local value, derr = _decrypt(rows[1].ciphertext)
+    local entry = store.secrets[name]
+    if not entry then return nil, "secrets: not found: " .. name end
+
+    local value, derr = _decrypt(entry.ciphertext)
     if not value then return nil, derr end
 
-    -- Substitute {secret} in URL, header values, and body.
     local url    = _substitute(opts.url, value)
-    local method = ((opts.method or "GET"):upper())
+    local method = (opts.method or "GET"):upper()
 
     local req_headers = {}
     if opts.headers then
@@ -307,33 +347,27 @@ function M.execute_with_secret(name, opts)
             req_headers[k] = _substitute(tostring(v), value)
         end
     end
-
     local req_body = opts.body and _substitute(opts.body, value) or nil
 
-    -- Zero out the value from local scope as early as possible.
-    value = nil  -- luacheck: ignore
+    value = nil  -- luacheck: ignore  (zero out before any I/O)
 
-    -- Perform the HTTP request.
+    -- Update usage tracking (best-effort).
+    local now = now_iso()
+    entry.last_used_at = now
+    entry.used_count   = (entry.used_count or 0) + 1
+    pcall(save_store, store)
+
     local httpc, herr = http.new()
     if not httpc then
         return nil, "secrets: failed to create http client: " .. tostring(herr)
     end
-    local timeout = tonumber(opts.timeout_ms) or 10000
-    httpc:set_timeout(timeout)
+    httpc:set_timeout(tonumber(opts.timeout_ms) or 10000)
 
     local res, rerr = httpc:request_uri(url, {
         method  = method,
         headers = req_headers,
         body    = req_body,
     })
-
-    -- Bump usage tracking (best-effort; ignore errors).
-    pcall(db.query, [[
-        UPDATE lm_secrets
-           SET last_used_at = now(), used_count = used_count + 1
-         WHERE name = ?
-    ]], name)
-
     if not res then
         return nil, "secrets: http request failed: " .. tostring(rerr)
     end

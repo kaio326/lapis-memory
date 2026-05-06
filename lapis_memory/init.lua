@@ -100,11 +100,15 @@ M.config = {
     -- Use this to enforce CSRF, rate limits, etc.
     before_request = nil,
     -- Secrets module (lapis_memory.secrets):
-    --   Key resolution order (first match wins):
+    --   secrets_file — path to the encrypted JSON store (local file; no DB table).
+    --     When not set, the secrets feature is disabled; everything else works normally.
+    --     The file is created automatically on first store().
+    --     Mount it as a Docker volume to make it available inside the container.
+    --   Master key resolution (first match wins):
     --   1. master_key_path — path to a file with the hex key (Docker secret, env file)
     --   2. master_key_env  — name of an env var holding the hex key
     --   3. master_key      — explicit 64-hex-char key in config (CI / dev only)
-    --   When none is set, secrets are disabled; all other features work normally.
+    secrets_file    = nil,
     master_key_path = nil,
     master_key_env  = nil,
     master_key      = nil,

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.5 — 2026-05-16
+
+- **Secrets: file-based store (breaking change vs 0.1.3/0.1.4)**: The
+  `lm_secrets` PostgreSQL table has been removed. Secrets are now stored as
+  AES-256-CBC encrypted entries in a local JSON file. Activation requires two
+  new config keys: `secrets_file` (path to the writable JSON file) and the
+  existing master-key resolution chain (`master_key_path` / `master_key_env` /
+  `master_key`). When `secrets_file` is not set, the feature is disabled; all
+  other features work normally. This means no DB table is created and the
+  feature can be activated per-deployment by mounting a volume file — no SQL
+  migration needed.
+  - `M.configure()` now sets `_file_path` from `config.secrets_file`.
+  - `M.enabled()` requires **both** `_key` and `_file_path` to be non-nil.
+  - `load_store()` / `save_store()` replace all DB queries; writes are atomic
+    (write to `.tmp` then `os.rename()`).
+  - `migration 005_lm_secrets.sql` deleted — run `memo migrate` output does
+    not include the `lm_secrets` table any more.
+  - 503 error message updated to `"secrets: not configured (secrets_file or
+    master_key not set)"`.
+
+## 0.1.4 — 2026-05-08
+
+- **`memo migrate`**: new CLI command that prints all idempotent SQL
+  migrations to stdout. Pipe directly to `psql` to bring any database up to
+  date in one step. No MEMO_URL required — runs without a running server.
+
 ## 0.1.3 — 2026-05-05
 
 - **Secrets management** (`lapis_memory.secrets`): encrypted API-key storage

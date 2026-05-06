@@ -302,22 +302,6 @@ ALTER TABLE lm_kg_facts ADD  CONSTRAINT lm_kg_facts_validity_window
 -- migration 004 / was_truncated flag ---------------------------------------
 
 ALTER TABLE lapis_memory ADD COLUMN IF NOT EXISTS was_truncated BOOLEAN NOT NULL DEFAULT FALSE;
-
--- migration 005 / lm_secrets -----------------------------------------------
--- AES-256-CBC encrypted secrets. Master key is never stored in the DB.
-
-CREATE TABLE IF NOT EXISTS lm_secrets (
-    id           SERIAL      PRIMARY KEY,
-    name         TEXT        NOT NULL UNIQUE,
-    ciphertext   TEXT        NOT NULL,
-    description  TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_used_at TIMESTAMPTZ,
-    used_count   INT         NOT NULL DEFAULT 0
-);
-
-CREATE INDEX IF NOT EXISTS lm_secrets_created_idx ON lm_secrets (created_at DESC);
 MIGRATE_EOF
 }
 
