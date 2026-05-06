@@ -226,9 +226,11 @@ design principle.
 
 ### Security model
 
-- Secrets are stored **AES-256-CBC encrypted** in the `lm_secrets` table.
-- The master key is **never persisted in the database**. It is held in
-  memory only while the server process is running.
+- Secrets are stored **AES-256-CBC encrypted** in a local JSON file on the
+  server. No database table is required — the file is the entire store.
+- The master key is **never persisted on disk**. It is held in memory only
+  while the server process is running (loaded from a Docker secret, env var,
+  or config at startup).
 - `list_secrets` / `secret_list` returns names and metadata only — no values.
 - `execute_with_secret` / `secret_execute` substitutes `{secret}` in URL,
   headers, and body **server-side**, makes the HTTP request, and returns
@@ -245,47 +247,81 @@ design principle.
 openssl rand -hex 32        # → 64-char hex string
 ```
 
-**2. Configure the key source (choose one)**
+**2. Choose a writable path for the secrets file**
+
+Pick any path that is writable by the OpenResty process and that you want
+to persist across restarts. The file is created automatically on the first
+`store()` call.
+
+```
+/run/secrets/lm_secrets.json        # Docker secret volume mount
+/app/data/lm_secrets.json           # App data directory (mount a volume here)
+/tmp/lm_secrets.json                # Ephemeral (dev / testing only)
+```
+
+**3. Configure `secrets_file` and the key source**
+
+Both `secrets_file` and a master key must be set for the feature to activate.
+If either is absent, secrets are **disabled** — all other lapis-memory features
+continue to work normally.
 
 ```lua
--- Option A — Docker secret (recommended for production)
+-- Recommended (production): Docker secrets for both the key and the file path
 memory.setup({
     embedder_local  = "hash",
     auth_fn         = ...,
-    master_key_path = "/run/secrets/lm_master_key",
+    secrets_file    = "/app/data/lm_secrets.json",   -- writable path; file is auto-created
+    master_key_path = "/run/secrets/lm_master_key",  -- file containing the 64-hex-char key
 })
 
--- Option B — environment variable
+-- Option B — environment variable for the key
 memory.setup({
     embedder_local = "hash",
     auth_fn        = ...,
+    secrets_file   = "/app/data/lm_secrets.json",
     master_key_env = "LM_MASTER_KEY",   -- name of the env var
 })
 
--- Option C — explicit value (CI / dev only; never commit production keys)
+-- Option C — explicit key value (CI / dev only; never commit production keys)
 memory.setup({
     embedder_local = "hash",
     auth_fn        = ...,
+    secrets_file   = "/tmp/lm_secrets.json",
     master_key     = "abcdef0123456789...",   -- 64 hex chars
 })
 ```
 
 Key resolution order: `master_key_path` → `master_key_env` → `master_key`.
-When none is set, secrets are **disabled** — all other lapis-memory features
-continue to work normally.
 
-**3. Apply the migration**
+**4. Persist the file across container restarts (Docker)**
 
-```bash
-psql -d mydb < lapis_memory/migrations/005_lm_secrets.sql
+Mount the directory containing the secrets file as a named volume so it
+survives container rebuilds:
+
+```yaml
+# docker-compose.yml
+services:
+  app:
+    volumes:
+      - lm_secrets_data:/app/data   # persists lm_secrets.json
+
+volumes:
+  lm_secrets_data:
 ```
+
+> ⚠️ If the file is not on a persistent volume, all stored secrets are lost
+> when the container is removed. Back up the file or use a bind-mount to a
+> host path if you need durability without a named volume.
+
+**No migration needed** — there is no database table. `memo migrate` output
+does not include any `lm_secrets` DDL.
 
 ### Usage (Lua API)
 
 ```lua
 local memory = require("lapis_memory")
 
--- Store a secret (value is encrypted before writing)
+-- Store a secret (value is encrypted before writing to the JSON file)
 memory.secrets.store("openai-key", "sk-...", "OpenAI API key")
 
 -- List secrets (names and metadata only — values never returned)
@@ -301,7 +337,7 @@ local body, err = memory.secrets.execute_with_secret("openai-key", {
 -- Delete a secret
 memory.secrets.delete("openai-key")
 
--- Check if secrets are enabled
+-- Check if secrets are enabled (secrets_file + master key both configured)
 if memory.secrets.enabled() then ... end
 ```
 
@@ -422,7 +458,7 @@ secret_execute("sendgrid-key",
 secret_delete("openai-key")
 ```
 
-Permanently deletes from the database. Cannot be undone.
+Permanently deletes from the secrets file. Cannot be undone.
 
 ### HTTP API
 
