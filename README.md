@@ -307,7 +307,12 @@ if memory.secrets.enabled() then ... end
 
 ### Usage (MCP tools)
 
-When the server is running, four MCP tools are available:
+> **These are not terminal commands.** You type them in the chat window of your
+> AI assistant (Claude Desktop, Copilot Agent Mode, Cursor, Continue.dev, etc.)
+> while the MCP server is connected. The assistant recognises them as tool calls
+> and executes them against the running lapis-memory HTTP API.
+
+Four tools are available once the MCP server is connected:
 
 | Tool | Description |
 |------|-------------|
@@ -316,16 +321,87 @@ When the server is running, four MCP tools are available:
 | `secret_delete(name)` | Permanently delete a secret |
 | `secret_execute(name, url, method?, headers?, body?, timeout_ms?)` | HTTP request with `{secret}` substituted server-side |
 
-Example: store and use an OpenAI API key from Claude Desktop / Copilot Agent Mode:
+#### Adding a new API key
+
+Type this in the chat window — the agent will call the tool:
 
 ```
-# Store the key once (value never returned again)
-secret_store("openai", "sk-...", "OpenAI API key")
-
-# Use it — {secret} is substituted server-side, not in this prompt
-secret_execute("openai", "https://api.openai.com/v1/models",
-               headers={"Authorization": "Bearer {secret}"})
+Store my OpenAI key: secret_store("openai-key", "sk-proj-...", "OpenAI API key")
 ```
+
+Or simply ask naturally and the agent will use the tool:
+
+```
+Save my SendGrid API key "SG.xxxxxxxx" as "sendgrid"
+```
+
+The value is encrypted server-side immediately. **It can never be retrieved** — not by
+you, not by the agent, not through any API. If you lose it you must store a new one.
+
+#### Verify what is stored
+
+```
+secret_list()
+```
+
+Returns names, descriptions, and timestamps — no values.
+
+#### Use a stored secret in an HTTP request
+
+```
+secret_execute("openai-key",
+  url    = "https://api.openai.com/v1/models",
+  method = "GET",
+  headers = { Authorization = "Bearer {secret}" })
+```
+
+Write `{secret}` anywhere in `url`, header values, or `body`. The server substitutes
+the decrypted value before making the request. Only the HTTP response body is returned
+to the agent — the raw key never enters the chat context.
+
+#### Real-world examples
+
+**Call OpenAI chat completions:**
+```
+secret_execute("openai-key",
+  url    = "https://api.openai.com/v1/chat/completions",
+  method = "POST",
+  headers = { Authorization = "Bearer {secret}", Content-Type = "application/json" },
+  body   = '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}')
+```
+
+**Send a message via Slack webhook:**
+```
+secret_execute("slack-webhook",
+  url    = "https://hooks.slack.com/services/{secret}",
+  method = "POST",
+  headers = { Content-Type = "application/json" },
+  body   = '{"text":"Deploy complete"}')
+```
+
+**Query GitHub API with a personal access token:**
+```
+secret_execute("github-token",
+  url    = "https://api.github.com/repos/myorg/myrepo/issues",
+  headers = { Authorization = "Bearer {secret}", Accept = "application/vnd.github+json" })
+```
+
+**Send email via SendGrid:**
+```
+secret_execute("sendgrid-key",
+  url    = "https://api.sendgrid.com/v3/mail/send",
+  method = "POST",
+  headers = { Authorization = "Bearer {secret}", Content-Type = "application/json" },
+  body   = '{"personalizations":[{"to":[{"email":"you@example.com"}]}],"from":{"email":"noreply@example.com"},"subject":"Hello","content":[{"type":"text/plain","value":"Hi!"}]}')
+```
+
+#### Remove a secret
+
+```
+secret_delete("openai-key")
+```
+
+Permanently deletes from the database. Cannot be undone.
 
 ### HTTP API
 
