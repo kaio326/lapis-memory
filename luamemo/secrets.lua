@@ -28,18 +28,42 @@
 -- When neither key nor file path is configured, all write operations return
 -- an error; list() returns an empty table; enabled() returns false.
 --
--- Crypto dependencies (standard Lua, no OpenResty required):
---   lua-openssl  (openssl.cipher, openssl.rand, openssl.hmac)
+-- Crypto dependencies — one backend required:
+--   resty.aes + resty.random + resty.sha256  (OpenResty / LuaJIT, bundled in
+--     the fat image — zero extra packages needed)
+--   openssl.*  (lua-openssl, plain Lua 5.1 fallback)
 -- HTTP dependency for execute_with_secret:
 --   luamemo.http  (tries resty.http, falls back to socket.http)
 
-local cipher_lib = require("openssl.cipher")
-local rand_lib   = require("openssl.rand")
-local hmac_lib   = require("openssl.hmac")
-local cjson      = require("cjson.safe")
-local http       = require("luamemo.http")
--- http is used only inside execute_with_secret but required at module level
--- so a missing dependency is caught immediately, not silently at call time.
+-- Auto-detect crypto backend.
+-- resty.aes is tried first — it ships with every openresty/openresty image and
+-- requires no additional packages.  The openssl.* fallback supports plain-Lua
+-- 5.1 consumers that have lua-openssl installed.
+local _crypto_backend
+local _aes_mod, _random_mod, _sha256_mod  -- resty backend handles
+local _cipher_lib, _rand_lib, _hmac_lib   -- openssl backend handles
+do
+    local ok, m = pcall(require, "resty.aes")
+    if ok then
+        _aes_mod        = m
+        _random_mod     = require("resty.random")
+        _sha256_mod     = require("resty.sha256")
+        _crypto_backend = "resty"
+    else
+        ok, m = pcall(require, "openssl.cipher")
+        if ok then
+            _cipher_lib     = m
+            _rand_lib       = require("openssl.rand")
+            _hmac_lib       = require("openssl.hmac")
+            _crypto_backend = "openssl"
+        else
+            _crypto_backend = nil
+        end
+    end
+end
+
+local cjson = require("cjson.safe")
+local http  = require("luamemo.http")
 
 local M = {}
 
@@ -207,45 +231,138 @@ function M.configure(config)
     end
 end
 
---- Returns true when both a master key and a secrets file path are configured.
+--- Returns true when a master key, secrets file path, and crypto backend are all configured.
 function M.enabled()
-    return _key ~= nil and _file_path ~= nil
+    return _key ~= nil and _file_path ~= nil and _crypto_backend ~= nil
 end
 
 -- ---------------------------------------------------------------------------
--- HMAC-SHA256 via lua-openssl
+-- Crypto backend adapters
 -- ---------------------------------------------------------------------------
 
-local function _hmac_sha256(key, message)
-    local m = hmac_lib.new(key, "sha256")
-    m:update(message)
-    return m:final()
+-- Returns n random binary bytes, or nil + err.
+local function _rand_bytes(n)
+    if _crypto_backend == "resty" then
+        -- strong=true → RAND_bytes (CSPRNG), matches OpenSSL semantics.
+        local b = _random_mod.bytes(n, true)
+        if not b or #b ~= n then
+            return nil, "resty.random returned unexpected length"
+        end
+        return b
+    else
+        local b = _rand_lib.bytes(n)
+        return b
+    end
+end
+
+-- HMAC-SHA256 for the resty backend.
+-- Implemented in pure Lua over resty.sha256 + LuaJIT bit.bxor (always
+-- available in LuaJIT — no extra package needed).
+local function _resty_hmac_sha256(key, msg)
+    local BLOCK = 64  -- SHA-256 block size in bytes
+    local bit   = require("bit")
+
+    -- If key is longer than one block, hash it first.
+    if #key > BLOCK then
+        local h = _sha256_mod:new()
+        h:update(key)
+        key = h:final()
+    end
+    -- Right-pad key to BLOCK bytes.
+    key = key .. string.rep("\0", BLOCK - #key)
+
+    -- Build inner/outer padded keys.
+    local ipad = key:gsub(".", function(c) return string.char(bit.bxor(c:byte(), 0x36)) end)
+    local opad = key:gsub(".", function(c) return string.char(bit.bxor(c:byte(), 0x5c)) end)
+
+    local h_inner = _sha256_mod:new()
+    h_inner:update(ipad)
+    h_inner:update(msg)
+    local inner = h_inner:final()
+
+    local h_outer = _sha256_mod:new()
+    h_outer:update(opad)
+    h_outer:update(inner)
+    return h_outer:final()
+end
+
+-- Returns HMAC-SHA256 binary digest, or nil + err.
+local function _hmac_sha256(key, msg)
+    if _crypto_backend == "resty" then
+        return _resty_hmac_sha256(key, msg)
+    else
+        local m = _hmac_lib.new(key, "sha256")
+        m:update(msg)
+        return m:final()
+    end
+end
+
+-- Returns AES-256-CBC ciphertext (PKCS7 padded), or nil + err.
+local function _aes_encrypt(key, iv, plaintext)
+    if _crypto_backend == "resty" then
+        -- _hash table with .iv tells resty.aes to use the key as-is (no
+        -- EVP_BytesToKey derivation) and to use the supplied raw IV.
+        local obj, err = _aes_mod:new(key, nil, _aes_mod.cipher(256, "cbc"),
+                                       {iv = iv})
+        if not obj then return nil, "resty.aes init: " .. tostring(err) end
+        local ct = obj:encrypt(plaintext)
+        if not ct then return nil, "resty.aes encrypt returned nil" end
+        return ct
+    else
+        local enc = _cipher_lib.new("aes-256-cbc")
+        enc:encrypt(key, iv, true)
+        enc:update(plaintext)
+        return enc:final()
+    end
+end
+
+-- Returns decrypted plaintext, or nil + err.
+local function _aes_decrypt(key, iv, ciphertext)
+    if _crypto_backend == "resty" then
+        local obj, err = _aes_mod:new(key, nil, _aes_mod.cipher(256, "cbc"),
+                                       {iv = iv})
+        if not obj then return nil, "resty.aes init: " .. tostring(err) end
+        local pt = obj:decrypt(ciphertext)
+        if not pt then return nil, "resty.aes decrypt returned nil (wrong key or corrupt data)" end
+        return pt
+    else
+        local dec = _cipher_lib.new("aes-256-cbc")
+        dec:decrypt(key, iv, true)
+        dec:update(ciphertext)
+        return dec:final()
+    end
 end
 
 local function _encrypt(plaintext)
     if not _key then return nil, "secrets: master key not configured" end
+    if not _crypto_backend then
+        return nil, "secrets: no crypto backend available (resty.aes not found; install lua-openssl as fallback)"
+    end
 
     -- 16 random bytes → fresh IV per encryption.
-    local iv = rand_lib.bytes(16)
-    if not iv or #iv ~= 16 then return nil, "secrets: failed to generate IV" end
+    local iv, ierr = _rand_bytes(16)
+    if not iv or #iv ~= 16 then
+        return nil, "secrets: failed to generate IV: " .. tostring(ierr)
+    end
 
-    local enc = cipher_lib.new("aes-256-cbc")
-    enc:encrypt(_key, iv, true)
-    enc:update(plaintext)
-    local ct = enc:final()
-    if not ct then return nil, "secrets: encryption failed" end
+    local ct, cerr = _aes_encrypt(_key, iv, plaintext)
+    if not ct then return nil, "secrets: " .. tostring(cerr) end
 
     local iv_hex = to_hex(iv)
     local ct_hex = to_hex(ct)
     -- Authenticate iv + ciphertext so any single-bit flip is caught before
     -- decryption (defeats CBC padding-oracle variants).
-    local mac_hex = to_hex(_hmac_sha256(_key, iv_hex .. ":" .. ct_hex))
+    local mac, merr = _hmac_sha256(_key, iv_hex .. ":" .. ct_hex)
+    if not mac then return nil, "secrets: " .. tostring(merr) end
 
-    return iv_hex .. ":" .. ct_hex .. ":" .. mac_hex
+    return iv_hex .. ":" .. ct_hex .. ":" .. to_hex(mac)
 end
 
 local function _decrypt(stored)
     if not _key then return nil, "secrets: master key not configured" end
+    if not _crypto_backend then
+        return nil, "secrets: no crypto backend available (resty.aes not found; install lua-openssl as fallback)"
+    end
 
     -- Format: iv_hex:ct_hex:mac_hex
     local iv_hex, ct_hex, mac_hex = stored:match(
@@ -255,7 +372,9 @@ local function _decrypt(stored)
     end
 
     -- Verify MAC before touching the ciphertext.
-    local expected_hex = to_hex(_hmac_sha256(_key, iv_hex .. ":" .. ct_hex))
+    local expected, merr = _hmac_sha256(_key, iv_hex .. ":" .. ct_hex)
+    if not expected then return nil, "secrets: " .. tostring(merr) end
+    local expected_hex = to_hex(expected)
     -- Constant-time comparison to prevent timing side-channel on the MAC.
     local mismatch = (#mac_hex ~= #expected_hex) and 1 or 0
     for i = 1, math.min(#mac_hex, #expected_hex) do
@@ -270,11 +389,8 @@ local function _decrypt(stored)
     local iv = from_hex(iv_hex)
     local ct = from_hex(ct_hex)
 
-    local dec = cipher_lib.new("aes-256-cbc")
-    dec:decrypt(_key, iv, true)
-    dec:update(ct)
-    local pt = dec:final()
-    if not pt then return nil, "secrets: decryption failed (wrong key or corrupt data)" end
+    local pt, derr = _aes_decrypt(_key, iv, ct)
+    if not pt then return nil, "secrets: decryption failed: " .. tostring(derr) end
 
     return pt
 end
