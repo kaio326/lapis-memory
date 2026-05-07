@@ -14,5 +14,5 @@ RUN apk add --no-cache \
     lua-date
 
 # The repo is mounted at /app at runtime — nothing to COPY here.
-# The library lives at /app/lapis_memory/, config at /app/dev/.
+# The library lives at /app/luamemo/, config at /app/dev/.
 
