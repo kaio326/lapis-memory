@@ -403,9 +403,56 @@ local function _substitute(template, secret_value)
     return (template:gsub("{secret}", function() return secret_value end))
 end
 
+-- Build a multipart/form-data body from a field table.
+-- fields: { field_name = string | { file = "/path", content_type? = "..." } }
+-- String values have {secret} substituted.  File contents are read as-is.
+-- Returns body_string, content_type_header_value, err.
+local function _build_multipart(fields, secret_value)
+    -- Use enough entropy in the boundary to make collisions astronomically
+    -- unlikely without a crypto dependency.
+    local boundary = string.format("luamemoBoundary%08x%08x",
+        math.random(0, 0x7fffffff), math.random(0, 0x7fffffff))
+
+    local parts = {}
+    for field_name, spec in pairs(fields) do
+        local disposition = 'Content-Disposition: form-data; name="' .. field_name .. '"'
+        if type(spec) == "table" and spec.file then
+            -- File upload part
+            local fpath = spec.file
+            local f = io.open(fpath, "rb")
+            if not f then
+                return nil, nil,
+                    "secrets: multipart: cannot read file for field '" .. field_name .. "': " .. fpath
+            end
+            local content = f:read("*all")
+            f:close()
+            local fname = fpath:match("([^/\\]+)$") or fpath
+            local ct    = spec.content_type or "application/octet-stream"
+            table.insert(parts,
+                "--" .. boundary .. "\r\n" ..
+                disposition .. '; filename="' .. fname .. '"\r\n' ..
+                "Content-Type: " .. ct .. "\r\n\r\n" ..
+                content .. "\r\n")
+        else
+            -- Plain field — apply {secret} substitution.
+            local value = _substitute(tostring(spec or ""), secret_value)
+            table.insert(parts,
+                "--" .. boundary .. "\r\n" ..
+                disposition .. "\r\n\r\n" ..
+                value .. "\r\n")
+        end
+    end
+
+    local body = table.concat(parts) .. "--" .. boundary .. "--\r\n"
+    local ct   = "multipart/form-data; boundary=" .. boundary
+    return body, ct, nil
+end
+
 --- Execute an HTTP request with the secret substituted server-side.
 --- @param name  string  Secret name to look up
---- @param opts  table   { url, method?, headers?, body?, timeout_ms? }
+--- @param opts  table   { url, method?, headers?, body?, multipart?, timeout_ms? }
+---   multipart: { field_name = string | { file="/path", content_type?="..." } }
+---   body and multipart are mutually exclusive.
 --- @return string|nil  Response body
 --- @return string|nil  Error message
 function M.execute_with_secret(name, opts)
@@ -414,6 +461,9 @@ function M.execute_with_secret(name, opts)
     opts = opts or {}
     if type(opts.url) ~= "string" or opts.url == "" then
         return nil, "secrets: execute_with_secret requires opts.url"
+    end
+    if opts.body and opts.multipart then
+        return nil, "secrets: body and multipart are mutually exclusive"
     end
 
     -- SSRF guard: only allow http:// and https:// schemes to prevent requests
@@ -442,7 +492,22 @@ function M.execute_with_secret(name, opts)
             req_headers[k] = _substitute(tostring(v), value)
         end
     end
-    local req_body = opts.body and _substitute(opts.body, value) or nil
+
+    local req_body
+    if opts.multipart then
+        -- Build multipart body *before* zeroing the secret so {secret} can
+        -- appear in plain-field values.  File contents are never substituted.
+        local mp_body, mp_ct, mp_err = _build_multipart(opts.multipart, value)
+        if not mp_body then
+            value = nil
+            return nil, mp_err
+        end
+        req_body = mp_body
+        req_headers["content-type"] = mp_ct
+        method = (opts.method or "POST"):upper()  -- POST is the sane default for multipart
+    else
+        req_body = opts.body and _substitute(opts.body, value) or nil
+    end
 
     value = nil  -- zero out before any I/O
 

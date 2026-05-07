@@ -294,11 +294,19 @@ function M.register(app, opts)
             else return json(400, { error = "headers must be a JSON object: " .. tostring(derr) })
             end
         end
+        local multipart = p.multipart
+        if type(multipart) == "string" then
+            local decoded, derr = cjson.decode(multipart)
+            if decoded then multipart = decoded
+            else return json(400, { error = "multipart must be a JSON object: " .. tostring(derr) })
+            end
+        end
         local body, err = secrets_mod.execute_with_secret(self.params.name, {
             url        = p.url,
             method     = p.method,
             headers    = headers,
             body       = p.body,
+            multipart  = multipart,
             timeout_ms = tonumber(p.timeout_ms),
         })
         if not body then return json(400, { error = err }) end

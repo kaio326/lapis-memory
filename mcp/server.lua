@@ -440,7 +440,9 @@ Tools.secret_execute = {
         .. "server-side. Write {secret} anywhere in the url, header values, "
         .. "or body — the server replaces it with the decrypted value before "
         .. "making the request. Only the response body is returned; the raw "
-        .. "secret NEVER appears in the tool result.",
+        .. "secret NEVER appears in the tool result. "
+        .. "For multipart/form-data uploads (e.g. file uploads to an API), "
+        .. "use the multipart field instead of body.",
     inputSchema = {
         type = "object",
         properties = {
@@ -450,12 +452,12 @@ Tools.secret_execute = {
             },
             url = {
                 type        = "string",
-                description = "Request URL. May contain {secret}, e.g. 'https://api.example.com/data?key={secret}'.",
+                description = "Request URL. May contain {secret}, e.g. 'https://api.example.com/1/{secret}/upload'.",
             },
             method = {
                 type        = "string",
                 enum        = { "GET", "POST", "PUT", "PATCH", "DELETE" },
-                description = "HTTP method (default GET).",
+                description = "HTTP method (default GET, or POST when multipart is set).",
             },
             headers = {
                 type        = "object",
@@ -463,7 +465,16 @@ Tools.secret_execute = {
             },
             body = {
                 type        = "string",
-                description = "Request body. May contain {secret}.",
+                description = "Request body string. May contain {secret}. Mutually exclusive with multipart.",
+            },
+            multipart = {
+                type        = "object",
+                description = "Multipart/form-data fields. Each key is a field name. "
+                    .. "String values are plain fields (may contain {secret}). "
+                    .. "File fields must be objects: { file = '/absolute/path', content_type? = '...' }. "
+                    .. "Mutually exclusive with body. Example: "
+                    .. "{ rockspec_file = { file = '/app/luamemo-0.2.0-1.rockspec' } }",
+                additionalProperties = true,
             },
             timeout_ms = {
                 type        = "integer",

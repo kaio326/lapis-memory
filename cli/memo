@@ -17,6 +17,9 @@
 #   memo secret-store  NAME [--desc DESCRIPTION] [--file PATH]
 #   memo secret-list
 #   memo secret-delete NAME
+#   memo secret-execute NAME URL [--method M] [--header K:V]... [--body TEXT]
+#                               [--form FIELD=VALUE]... [--form-file FIELD:PATH]
+#                               [--timeout-ms N]
 #   memo migrate         Print all luamemo migration SQL to stdout (pipe to psql)
 #   memo init    [--non-interactive] [--multilingual] [--long] [--hosted] [--allow-hash] [--write PATH] [--root DIR]
 #   memo doctor  [--setup PATH] [--json]
@@ -197,6 +200,69 @@ cmd_secret_delete() {
         echo "Usage: memo secret-delete NAME" >&2; exit 1
     fi
     curl -sS -X POST "${MEMO_URL}/secrets/$1/delete" "${TOKEN_HEADER[@]}" | jq .
+}
+
+cmd_secret_execute() {
+    require_jq
+    if [[ -z "${1:-}" ]] || [[ -z "${2:-}" ]]; then
+        echo "Usage: memo secret-execute NAME URL [--method M] [--header K:V]..." >&2
+        echo "                                   [--body TEXT]" >&2
+        echo "                                   [--form FIELD=VALUE]..." >&2
+        echo "                                   [--form-file FIELD:PATH]..." >&2
+        echo "                                   [--timeout-ms N]" >&2
+        exit 1
+    fi
+    local name="$1" url="$2"; shift 2
+    local method= timeout_ms= body= headers='{}'
+    local -a form_fields=()   # plain string fields
+    local -a form_files=()    # file fields
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --method)     method="$2";     shift 2 ;;
+            --timeout-ms) timeout_ms="$2"; shift 2 ;;
+            --body)       body="$2";       shift 2 ;;
+            --header)
+                # K:V  — add to the headers JSON object
+                local hkey="${2%%:*}" hval="${2#*:}"
+                headers=$(printf '%s' "$headers" | jq --arg k "$hkey" --arg v "$hval" '. + {($k): $v}')
+                shift 2 ;;
+            --form)
+                # FIELD=VALUE
+                form_fields+=("$2"); shift 2 ;;
+            --form-file)
+                # FIELD:PATH
+                form_files+=("$2"); shift 2 ;;
+            *) echo "memo secret-execute: unknown flag: $1" >&2; exit 1 ;;
+        esac
+    done
+
+    # Build the JSON payload.
+    local payload; payload=$(jq -n --arg url "$url" '{url: $url}')
+    [[ -n "$method"     ]] && payload=$(printf '%s' "$payload" | jq --arg v "$method"     '. + {method: $v}')
+    [[ -n "$timeout_ms" ]] && payload=$(printf '%s' "$payload" | jq --argjson v "$timeout_ms" '. + {timeout_ms: $v}')
+    [[ -n "$body"       ]] && payload=$(printf '%s' "$payload" | jq --arg v "$body"       '. + {body: $v}')
+    if [[ "$headers" != "{}" ]]; then
+        payload=$(printf '%s' "$payload" | jq --argjson v "$headers" '. + {headers: $v}')
+    fi
+
+    # Build multipart object when --form or --form-file flags are present.
+    if [[ ${#form_fields[@]} -gt 0 ]] || [[ ${#form_files[@]} -gt 0 ]]; then
+        local mp='{}'
+        for kv in "${form_fields[@]}"; do
+            local fk="${kv%%=*}" fv="${kv#*=}"
+            mp=$(printf '%s' "$mp" | jq --arg k "$fk" --arg v "$fv" '. + {($k): $v}')
+        done
+        for kv in "${form_files[@]}"; do
+            local fk="${kv%%:*}" fv="${kv#*:}"
+            mp=$(printf '%s' "$mp" | jq --arg k "$fk" --arg v "$fv" '. + {($k): {file: $v}}')
+        done
+        payload=$(printf '%s' "$payload" | jq --argjson v "$mp" '. + {multipart: $v}')
+    fi
+
+    curl -sS -X POST "${MEMO_URL}/secrets/${name}/execute" \
+        "${TOKEN_HEADER[@]}" \
+        -H "Content-Type: application/json" \
+        -d "$payload" | jq .
 }
 
 # ---------------------------------------------------------------------------
@@ -391,9 +457,10 @@ case "$sub" in
     delete) cmd_delete "$@" ;;
     summarize) cmd_summarize "$@" ;;
     promote) cmd_promote "$@" ;;
-    secret-store)  cmd_secret_store  "$@" ;;
-    secret-list)   cmd_secret_list        ;;
-    secret-delete) cmd_secret_delete "$@" ;;
+    secret-store)   cmd_secret_store   "$@" ;;
+    secret-list)    cmd_secret_list         ;;
+    secret-delete)  cmd_secret_delete  "$@" ;;
+    secret-execute) cmd_secret_execute "$@" ;;
     migrate) cmd_migrate ;;
     init)    cmd_local_lua init   "$@" ;;
     doctor)  cmd_local_lua doctor "$@" ;;
