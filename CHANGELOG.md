@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.2.3 — 2026-05-07
+
+- **Remove web UI** (`luamemo/web.lua` deleted). The `memo` CLI already
+  covers all web UI functionality (`search`, `recent`, `get`, `update`,
+  `delete`) with better agent ergonomics (pipeable, no browser needed).
+  `M.web` removed from `init.lua`.
+- **Drop `lapis` dependency** from rockspec. The library never `require("lapis")`
+  — `routes.lua` accepts a Lapis `app` object supplied by the host, and
+  `db.lua` pcall-detects `lapis.db` opportunistically. Lapis remains supported
+  as a host framework; it is no longer a required install.
+- **Fix `db_table` default**: `"lapis_memory"` → `"lm_memories"` in
+  `init.lua`. The table was renamed in 0.2.0 but the default config value
+  was not updated, causing fresh installs to query the wrong table name.
+- **Fix `memo migrate` SQL**: all `lapis_memory` table/index/trigger names
+  updated to `lm_memories` to match `schema.sql` and the migration files.
+- **Fix `memo` CLI `require` path**: `require('lapis_memory.cli…')` →
+  `require('luamemo.cli…')` — the old path has never worked since the
+  package rename.
+- README: removed `lua-openssl` from the hard-dependencies description;
+  updated architecture diagram and flow descriptions to remove Web UI
+  references.
+
+---
+
+## 0.2.2 — 2026-05-07
+
+- **Fix `decode_body` in `routes.lua`**: the old early-return on
+  `next(self.params)` caused the JSON request body to be silently ignored
+  on any route that has URL path params (e.g. `:name`). This broke
+  `POST /secrets/:name/execute` — the `url`, `method`, `headers`, and
+  `body` fields from the JSON body were never read. The fix merges URL
+  params first, then overlays JSON body fields so both are always available.
+
+---
+
+## 0.2.1 — 2026-05-07
+
+- **`luamemo.crypto`**: new pure-Lua AES-256-CBC + HMAC-SHA256 module.
+  Zero C dependencies — uses `bit` (LuaJIT/OpenResty), `bit32` (Lua 5.2),
+  or a pure-Lua fallback with a precision-safe `lshift`. CSPRNG reads
+  `/dev/urandom` with an xorshift64* fallback.
+- **`luamemo.secrets` rewritten** to use `luamemo.crypto` exclusively.
+  Removes the `resty.aes` / `lua-openssl` multi-backend detection block.
+  ⚠ Secrets encrypted with the `lua-openssl` backend (v0.2.0) must be
+  re-stored after upgrading — the on-disk format is the same
+  (`iv_hex:ct_hex:mac_hex`) but the AES implementation differs.
+- **Drop `lua-openssl` dependency** from rockspec. Pure-Lua crypto makes
+  the C extension unnecessary.
+
+---
+
 ## 0.2.0 — 2026-05-06
 
 - `luamemo/util.lua`: extracted `clip()` and `parse_scores()` helpers shared

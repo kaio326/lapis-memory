@@ -287,7 +287,6 @@ M.update = function(id, patch) return store.update(id, patch) end
 M.delete = function(id)   return store.delete(id) end
 
 M.routes  = routes
-M.web     = require("luamemo.web")
 M.embed   = embed
 M.store   = store
 M.summarizer = summarizer

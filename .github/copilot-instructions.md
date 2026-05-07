@@ -11,12 +11,12 @@ It is **not** a runnable app by itself — it is consumed by a host app or eval 
 
 - **GitHub**: https://github.com/kaio326/luamemo
 - **LuaRocks package name**: `luamemo`
-- **Current version**: `0.2.0-1` (tag `v0.2.0`)
+- **Current version**: `0.2.3-1` (tag `v0.2.3`)
 - **Primary consumer**: the `portfolio` app at https://github.com/kaio326/portfolio
 
 ## Stack
 - **Language**: Lua 5.1 / LuaJIT (OpenResty or plain Lua 5.1+)
-- **Runtime APIs**: `lua-openssl` (crypto), `luasocket`/`resty.http` (HTTP), `ngx.*` (OpenResty only)
+- **Runtime APIs**: `luamemo.crypto` (pure-Lua AES-256-CBC + HMAC-SHA256), `luasocket`/`resty.http` (HTTP), `ngx.*` (OpenResty only)
 - **DB**: PostgreSQL 15 via `luamemo.db` — delegates to `lapis.db` in OpenResty; pgmoon outside
 - **Protocol**: MCP (Model Context Protocol) stdio JSON-RPC 2.0 via `mcp/server.lua`
 - **No Node, no Python runtime** — pure Lua
@@ -31,10 +31,10 @@ luamemo/           Core library modules
   db.lua                Portable PostgreSQL adapter (lapis.db in OpenResty; pgmoon outside)
   http.lua              Portable HTTP client (resty.http in OpenResty; socket.http outside)
   routes.lua            Lapis HTTP route factory (M.register)
-  web.lua               Self-contained admin web UI
   kg.lua                Knowledge-graph (lm_kg_facts)
   rerank.lua            Reranker dispatch
-  secrets.lua           AES-256-CBC encrypted secret storage (lua-openssl)
+  secrets.lua           AES-256-CBC encrypted secret storage (pure-Lua via luamemo.crypto)
+  crypto.lua            Pure-Lua AES-256-CBC + HMAC-SHA256 + CSPRNG (zero C deps)
   summarizer.lua        Background summarizer
   adapters/             Embedder adapters (ollama, openai, tei, …)
   embedders/            hash (pure-Lua, zero-deps)
@@ -47,7 +47,7 @@ mcp/
 cli/
   memo                  Shell entrypoint (memo init, memo doctor, memo run)
 examples/               Usage documentation
-luamemo-0.2.0-1.rockspec
+luamemo-0.2.3-1.rockspec
 ```
 
 ## Architecture
@@ -91,15 +91,15 @@ All config keys set on `M.config`. `M.setup()` is called once by the host app at
 | `master_key_env` | Name of an env var containing the master key |
 | `master_key` | Explicit master key string (dev/CI only) |
 
-## Secrets Module (`luamemo/secrets.lua`) — v0.1.3
+## Secrets Module (`luamemo/secrets.lua`) — v0.2.1+
 
 ### Design principle: execute_with_secret
 The raw secret value **never crosses the LLM context boundary**. Only the HTTP response is returned.
 
 ### Key points
-- AES-256-CBC encryption via `lua-openssl` (`openssl.cipher`, `openssl.rand`, `openssl.hmac`)
-- Stored format: `"<32-char iv_hex>:<ciphertext_hex>:<64-char mac_hex>"` in `lm_secrets.ciphertext`
-- **Breaking change vs v0.1.2**: format changed from `"<16-char salt_hex>:<ciphertext_hex>"` — existing v0.1.2 secrets cannot be decrypted by v0.1.3; must be re-stored
+- AES-256-CBC + HMAC-SHA256 via `luamemo.crypto` (pure Lua, zero C deps)
+- Secrets stored in a **JSON file on disk** (`secrets_file` config key). No database table.
+- Stored format per entry: `"<32-char iv_hex>:<ciphertext_hex>:<64-char mac_hex>"`
 - Master key resolution order: `master_key_path` file → `master_key_env` env var → `master_key` explicit. If none set, module is disabled; all other library features continue to work.
 - No `get_secret` API exists — values cannot be retrieved through the HTTP or MCP layer
 
@@ -118,16 +118,21 @@ secrets.execute_with_secret(name, opts)  -- → response_body, err
 `execute_with_secret` opts: `{ url, method?, headers?, body?, timeout_ms? }`.
 Write `{secret}` anywhere in `url`, header values, or `body` — it is substituted server-side.
 
-### DB table (`lm_secrets`)
-Migration: `luamemo/migrations/005_lm_secrets.sql`
-Columns: `id`, `name` (UNIQUE), `ciphertext`, `description`, `created_at`, `updated_at`, `last_used_at`, `used_count`.
+### Config keys for secrets
+| Key | Purpose |
+|-----|---------|
+| `secrets_file` | Writable path for the JSON secrets file (auto-created). Required to enable secrets. |
+| `master_key_path` | Path to a file containing the 64-hex-char master key |
+| `master_key_env` | Name of an env var containing the master key |
+| `master_key` | Explicit master key string (dev/CI only) |
 
 ## Migrations Pattern
 - `migrations/001_init.sql` runs `\i schema.sql` for fresh installs
 - `schema.sql` / `schema_bruteforce.sql` define only the base `lm_memories` table
-- All addons (KG, secrets, …) live in numbered migration files
+- All addons (KG) live in numbered migration files
 - Migrations must be idempotent (`IF NOT EXISTS`, `IF EXISTS`)
-- Apply sequentially: `psql -d mydb < luamemo/migrations/005_lm_secrets.sql`
+- Apply sequentially: `psql -d mydb < luamemo/migrations/003_kg.sql`
+- Secrets have **no migration** — they use a JSON file, not a DB table
 
 ## Rockspec Conventions
 - File naming: `luamemo-<version>-<revision>.rockspec`
@@ -137,11 +142,11 @@ Columns: `id`, `name` (UNIQUE), `ciphertext`, `description`, `created_at`, `upda
 
 ## Consumer App Wiring (portfolio)
 The portfolio app (`helpers/memory.lua`) calls `M.setup()` wrapped in `pcall` — failures log to `ngx.ERR` and never block app startup. To enable secrets in the portfolio:
-1. Add `master_key_path = "/run/secrets/lm_master_key"` to the `setup({})` call in `helpers/memory.lua`
+1. Add `secrets_file = "/app/data/lm_secrets.json"` and `master_key_path = "/run/secrets/lm_master_key"` to the `setup({})` call in `helpers/memory.lua`
 2. Generate key: `openssl rand -hex 32 > secrets/lm_master_key.txt`
 3. Add `lm_master_key` to `docker-compose.yml` secrets section
-4. Append `005_lm_secrets.sql` to portfolio's `db_migration.sql`
-5. Bump `luarocks-5.1 install luamemo` version in portfolio's `Dockerfile` to `0.2.0-1`
+4. Mount a persistent volume for `/app/data/` so the secrets file survives container restarts
+5. Bump `luarocks-5.1 install luamemo` version in portfolio's `Dockerfile` to `0.2.3-1`
 
 ## Implementation Philosophy
 When making changes to this codebase, always build things the right way — no shortcuts, no deferred abstractions, no "we'll fix it later." If a component needs to be rewritten to be correct, rewrite it. Leaving known technical debt in place is never acceptable. The goal is a codebase that does not need to be revisited for the same problem twice.
@@ -176,10 +181,10 @@ Types: `feat`, `fix`, `refactor`, `chore`, `docs`.
 | `luamemo/routes.lua` | HTTP route factory; `M.register(app, opts)` |
 | `luamemo/db.lua` | Portable PostgreSQL adapter (lapis.db → OpenResty; pgmoon → plain Lua) |
 | `luamemo/http.lua` | Portable HTTP client (resty.http → OpenResty; socket.http → plain Lua) |
-| `luamemo/secrets.lua` | AES-256-CBC secret storage + execute_with_secret |
+| `luamemo/crypto.lua` | Pure-Lua AES-256-CBC + HMAC-SHA256 + CSPRNG |
+| `luamemo/secrets.lua` | AES-256-CBC secret storage (JSON file) + execute_with_secret |
 | `luamemo/kg.lua` | Knowledge-graph fact store |
-| `luamemo/migrations/005_lm_secrets.sql` | lm_secrets table migration |
 | `mcp/server.lua` | Standalone MCP stdio server (11 tools) |
-| `cli/memo` | CLI entrypoint (memo init, doctor, run) |
-| `luamemo-0.2.0-1.rockspec` | Current LuaRocks package spec |
+| `cli/memo` | CLI entrypoint (memo init, doctor, run, and all HTTP-API commands) |
+| `luamemo-0.2.3-1.rockspec` | Current LuaRocks package spec |
 | `CHANGELOG.md` | Release notes |

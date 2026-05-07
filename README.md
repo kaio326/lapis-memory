@@ -9,9 +9,10 @@ backend is a pure-Lua brute-force search that runs on any Postgres 15+.
 > errors in chat clients, container restarts, and device switches — without
 > taking on any new runtime services beyond what your app already runs.
 
-**Lua-first.** Every component — embedder, store, routes, Web UI, MCP
-server, summarizer — is written in Lua. Hard dependencies are PostgreSQL,
-`lua-openssl` (AES-256-CBC crypto), and `luasocket` (HTTP outside OpenResty).
+**Lua-first.** Every component — embedder, store, routes, MCP server,
+summarizer — is written in Lua. Hard dependencies are PostgreSQL and
+`luasocket` (HTTP outside OpenResty). Crypto (AES-256-CBC + HMAC-SHA256)
+is implemented in pure Lua (`luamemo.crypto`) — no C extension required.
 OpenResty is optional — the library runs in any Lua 5.1+ runtime.
 
 ---
@@ -67,7 +68,7 @@ OpenResty is optional — the library runs in any Lua 5.1+ runtime.
           ┌──────────────────────────────────┐
           │  Caller surfaces                  │
           │  HTTP routes  │  CLI (memo)  │   │
-          │  Web UI       │  MCP server  │   │
+          │               │  MCP server  │   │
           └──────┬───────────┬───────────────┘
                  │           │
                  ▼           ▼
@@ -104,8 +105,7 @@ OpenResty is optional — the library runs in any Lua 5.1+ runtime.
 | `luamemo.embed`                | Embedder dispatcher. Picks in-process embedder or HTTP adapter. |
 | `luamemo.embedders.hash`       | Pure-Lua feature-hashing embedder. Zero deps.   |
 | `luamemo.adapters.*`           | HTTP embedder adapters (Ollama, OpenAI, Voyage, Cohere, generic). |
-| `luamemo.routes`               | Lapis route factory. 7 endpoints under one prefix. |
-| `luamemo.web`                  | Server-rendered admin browser. Pure-Lua HTML, double-submit-cookie CSRF. |
+| `luamemo.routes`               | HTTP route factory. Mounts all memory, KG, and secrets endpoints under one prefix. |
 | `luamemo.secrets`              | AES-256-CBC encrypted secret storage + `execute_with_secret`. Requires `master_key_*` config. |
 | `luamemo.kg`                   | Knowledge-graph fact store (`lm_kg_facts` table). |
 | `luamemo.summarizer`           | Selection + adapter dispatch + transactional replacement. |
@@ -139,7 +139,7 @@ OpenResty is optional — the library runs in any Lua 5.1+ runtime.
    - blends them by `hybrid_weights`,
    - multiplies by `importance · exp(-decay_rate · days_since_updated)`,
    - sorts and limits.
-4. Rows returned in a backend-agnostic shape so HTTP / Web UI / CLI / MCP
+4. Rows returned in a backend-agnostic shape so HTTP / CLI / MCP
    are unaffected by which backend ran.
 
 ### Backends
@@ -547,17 +547,7 @@ memory.delete(42)
 
 ## Web UI
 
-A self-contained, server-rendered admin browser at `/memory/ui` (mount
-prefix configurable). List, search, scope/kind filter, inline edit, and
-delete with double-submit-cookie CSRF. Pure-Lua HTML rendering, zero
-template-engine dependency on the host app:
-
-```lua
-memory.routes.register(app, { prefix = "/api/memory" })
-memory.web.register(app,    { prefix = "/memory/ui" })
-```
-
-See [examples/web_ui.md](examples/web_ui.md) for the full QA recipe.
+Use `memory.routes.register(app, { prefix = "/api/memory" })` to mount all endpoints, then interact via the `memo` CLI or the MCP server — both talk to the same HTTP API.
 
 ---
 
@@ -636,7 +626,7 @@ different model.
 ## Backends & cost
 
 `luamemo` ships two backends. Both are first-class — the HTTP API,
-Web UI, CLI, and MCP server work identically against either.
+CLI, and MCP server work identically against either.
 
 ### `bruteforce` (default, zero infra)
 
