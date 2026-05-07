@@ -10,20 +10,32 @@ local function json(status, body)
 end
 
 local function decode_body(self)
-    if self.params and next(self.params) then return self.params end
-    -- Explicit JSON body parsing: lapis does not always auto-decode
-    -- application/json bodies, so read the raw body and parse it here.
+    -- Start with URL/route params (e.g. :name from the path).
+    local p = {}
+    if self.params then
+        for k, v in pairs(self.params) do p[k] = v end
+    end
+    -- Always parse a JSON body when Content-Type says so; body fields
+    -- overlay URL params so callers can rely on p.url, p.body, etc.
+    -- The old early-return on next(self.params) was wrong: routes with
+    -- URL params like :name always have params, causing the JSON body
+    -- to be silently ignored.
     local ct = (self.req and self.req.headers and self.req.headers["content-type"]) or ""
     if ct:find("application/json", 1, true) then
         ngx.req.read_body()
         local raw = ngx.req.get_body_data()
         if raw and raw ~= "" then
             local ok, parsed = pcall(cjson.decode, raw)
-            if ok and type(parsed) == "table" then return parsed end
+            if ok and type(parsed) == "table" then
+                for k, v in pairs(parsed) do p[k] = v end
+            end
+        end
+    else
+        if self.req and self.req.params_post then
+            for k, v in pairs(self.req.params_post) do p[k] = v end
         end
     end
-    if self.req and self.req.params_post then return self.req.params_post end
-    return {}
+    return p
 end
 
 local function get_cfg()
