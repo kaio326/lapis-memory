@@ -385,6 +385,73 @@ handlers["secret-execute"] = function(p)
     out({ ok = true, response = body })
 end
 
+-- schema-check: verify lm_memories and lm_kg_facts tables + columns exist.
+-- Returns:
+--   { ok=true, tables={ lm_memories={present, missing_cols}, lm_kg_facts={present, missing_cols} } }
+handlers["schema-check"] = function(_p)
+    local db = require("luamemo.db")
+
+    -- Expected columns per table (covers all migrations 001–005).
+    local expected = {
+        lm_memories = {
+            "id", "scope", "kind", "title", "body", "tags", "metadata",
+            "embedding", "importance", "decay_rate", "was_truncated",
+            "fts", "created_at", "updated_at",
+        },
+        lm_kg_facts = {
+            "id", "scope", "subject", "predicate", "object",
+            "valid_from", "valid_until", "source_memory_id", "created_at",
+        },
+    }
+
+    local result = { tables = {} }
+
+    for tbl, cols in pairs(expected) do
+        -- Query information_schema for columns present in this table.
+        local rows, err = db.query(
+            "SELECT column_name FROM information_schema.columns "
+            .. "WHERE table_schema = 'public' AND table_name = ?",
+            tbl)
+
+        if not rows then
+            -- DB unreachable or query error — report as table absent.
+            result.tables[tbl] = {
+                present      = false,
+                missing_cols = cols,
+                db_error     = tostring(err),
+            }
+        else
+            local found = {}
+            for _, row in ipairs(rows) do
+                found[row.column_name] = true
+            end
+
+            local missing = {}
+            for _, col in ipairs(cols) do
+                if not found[col] then
+                    missing[#missing + 1] = col
+                end
+            end
+
+            result.tables[tbl] = {
+                present      = #rows > 0,
+                missing_cols = missing,
+            }
+        end
+    end
+
+    -- Overall ok: both tables present and no missing columns.
+    local all_ok = true
+    for _, info in pairs(result.tables) do
+        if not info.present or #info.missing_cols > 0 then
+            all_ok = false
+            break
+        end
+    end
+    result.ok = all_ok
+    out(result)
+end
+
 -- context: composite search + kg-query → formatted block
 handlers["context"] = function(p)
     local store = require("luamemo.store")

@@ -20,7 +20,7 @@
 #                    [--decay-threshold F] [--max-rows N]
 #   memo calibrate [--scope SCOPE] [--root DIR] [--no-git] [--no-comments] [--dry-run]
 #                  [--probe-only] [--multilingual] [--long] [--hosted] [--allow-hash]
-#                  [--write PATH]
+#                  [--write PATH] [--no-migrate] [--no-mcp]
 #   memo secret-store  NAME [--desc DESCRIPTION] [--file PATH]
 #   memo secret-list
 #   memo secret-delete NAME
@@ -460,6 +460,7 @@ cmd_consolidate() {
 # ---------------------------------------------------------------------------
 cmd_calibrate() {
     local root="." scope="" dry_run=false no_git=false no_comments=false probe_only=false
+    local no_migrate=false no_mcp=false
     local lua_extra_flags=""
 
     while [[ $# -gt 0 ]]; do
@@ -470,6 +471,8 @@ cmd_calibrate() {
             --no-git)      no_git=true;      shift   ;;
             --no-comments) no_comments=true; shift   ;;
             --probe-only)  probe_only=true;  shift   ;;
+            --no-migrate)  no_migrate=true;  shift   ;;
+            --no-mcp)      no_mcp=true;      shift   ;;
             --non-interactive|--multilingual|--long|--hosted|--allow-hash)
                 lua_extra_flags+="[==[${1}]==],"; shift ;;
             --write)
@@ -509,6 +512,70 @@ cmd_calibrate() {
         echo ""
         echo "  Saved to ~/.memorc — future runs need no configuration."
         export MEMO_DB_URL
+    fi
+
+    # ── Phase 2.5: schema check ─────────────────────────────────────────────
+    # Query information_schema to verify lm_memories and lm_kg_facts exist
+    # and carry all expected columns.  If anything is missing, offer to apply
+    # the full schema automatically (requires psql on PATH).
+    if [[ "${no_migrate:-false}" != "true" ]]; then
+        echo ""
+        echo "Checking schema..."
+
+        local schema_result
+        schema_result=$(printf '{}' | api_call schema-check 2>/dev/null || echo '{"ok":false,"db_error":"api call failed"}')
+
+        local schema_ok
+        schema_ok=$(printf '%s' "$schema_result" | jq -r '.ok // false' 2>/dev/null || echo "false")
+
+        if [[ "$schema_ok" == "true" ]]; then
+            echo "  Schema: OK"
+        else
+            # Collect details: which tables are missing or have missing columns.
+            local mem_present mem_missing kg_present kg_missing
+            mem_present=$(printf '%s' "$schema_result" | jq -r '.tables.lm_memories.present // false' 2>/dev/null || echo "false")
+            mem_missing=$(printf '%s' "$schema_result" | jq -r '(.tables.lm_memories.missing_cols // []) | join(", ")' 2>/dev/null || echo "")
+            kg_present=$(printf '%s' "$schema_result" | jq -r '.tables.lm_kg_facts.present // false' 2>/dev/null || echo "false")
+            kg_missing=$(printf '%s' "$schema_result" | jq -r '(.tables.lm_kg_facts.missing_cols // []) | join(", ")' 2>/dev/null || echo "")
+
+            echo "  Schema: incomplete"
+            [[ "$mem_present" != "true" ]] && echo "    - lm_memories table: missing"
+            [[ "$mem_present" == "true" ]] && [[ -n "$mem_missing" ]] && echo "    - lm_memories columns missing: $mem_missing"
+            [[ "$kg_present" != "true" ]] && echo "    - lm_kg_facts table: missing"
+            [[ "$kg_present" == "true" ]] && [[ -n "$kg_missing" ]] && echo "    - lm_kg_facts columns missing: $kg_missing"
+            echo ""
+
+            local do_migrate="n"
+            if command -v psql >/dev/null 2>&1; then
+                echo -n "  Apply schema now? [y/N] "
+                read -r do_migrate
+            else
+                echo "  psql not found — cannot apply schema automatically."
+            fi
+
+            if [[ "$do_migrate" =~ ^[Yy]$ ]]; then
+                echo "  Applying schema..."
+                if cmd_migrate | PGPASSWORD="${PGPASSWORD:-}" psql "$MEMO_DB_URL" -v ON_ERROR_STOP=1 -q; then
+                    echo "  Schema applied successfully."
+                else
+                    echo ""
+                    echo "  ERROR: psql exited with an error. Check the output above." >&2
+                    echo "  You can apply the schema manually:" >&2
+                    echo "    memo migrate | psql \"\$MEMO_DB_URL\"" >&2
+                    echo "  Codebase ingest will be skipped until the schema is ready." >&2
+                    return 1
+                fi
+            else
+                echo ""
+                echo "  Schema not applied. Memories cannot be stored without it."
+                echo "  To apply manually:"
+                echo "    memo migrate | psql \"$MEMO_DB_URL\""
+                echo ""
+                echo "  Without the schema, codebase ingest will fail."
+                echo "  Re-run memo calibrate once the schema is in place."
+                return 0
+            fi
+        fi
     fi
 
     # ── Phase 3: auto-detect scope ──────────────────────────────────────────
@@ -583,6 +650,162 @@ cmd_calibrate() {
             | api_call kg-assert >/dev/null 2>&1 || true
         fi
     fi
+
+    # ── Phase 5: IDE detection + MCP config ─────────────────────────────────
+    if [[ "${no_mcp:-false}" != "true" ]]; then
+        _calibrate_mcp_phase "$root" "$scope"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# IDE detection + MCP config writer (called from cmd_calibrate phase 5)
+# ---------------------------------------------------------------------------
+_calibrate_mcp_phase() {
+    local root="$1" scope="$2"
+
+    local lua_bin; lua_bin=$(find_lua) || lua_bin="lua"
+    # Resolve absolute path to mcp/server.lua — prefer relative to this script,
+    # then fall back to the repo root detected by find_lua's package resolution.
+    local script_dir; script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local mcp_server="${script_dir}/../mcp/server.lua"
+    # Canonicalise if realpath is available.
+    command -v realpath >/dev/null 2>&1 && mcp_server=$(realpath "$mcp_server" 2>/dev/null || echo "$mcp_server")
+
+    local db_url="${MEMO_DB_URL:-}"
+
+    # Build the MCP server env block (JSON).
+    local mcp_env
+    mcp_env=$(jq -n \
+        --arg db  "$db_url" \
+        --arg sc  "$scope" \
+        '{"MEMO_DB_URL": $db, "MEMO_SCOPE": $sc}')
+
+    # Build the VS Code / Claude Desktop / Cursor MCP entry (JSON).
+    local vscode_entry
+    vscode_entry=$(jq -n \
+        --arg cmd "$lua_bin" \
+        --arg srv "$mcp_server" \
+        --argjson env "$mcp_env" \
+        '{"type":"stdio","command":$cmd,"args":[$srv],"env":$env}')
+
+    local claude_entry
+    claude_entry=$(jq -n \
+        --arg cmd "$lua_bin" \
+        --arg srv "$mcp_server" \
+        --argjson env "$mcp_env" \
+        '{"command":$cmd,"args":[$srv],"env":$env}')
+
+    echo ""
+    echo "MCP client configuration"
+    echo "========================"
+
+    # ── VS Code (.vscode/mcp.json) ───────────────────────────────────────
+    local vscode_dir="${root}/.vscode"
+    local vscode_mcp="${vscode_dir}/mcp.json"
+    local has_vscode=false
+    [[ -d "$vscode_dir" ]] && has_vscode=true
+
+    if [[ "$has_vscode" == "true" ]]; then
+        echo "  Detected: VS Code workspace (.vscode/ found)"
+        if [[ -f "$vscode_mcp" ]]; then
+            # Check if luamemo entry already exists.
+            local already
+            already=$(jq -r '.servers.luamemo // empty' "$vscode_mcp" 2>/dev/null || echo "")
+            if [[ -n "$already" ]]; then
+                echo "  .vscode/mcp.json: luamemo entry already present — skipping."
+            else
+                echo -n "  Write luamemo MCP entry to .vscode/mcp.json? [y/N] "
+                local ans; read -r ans
+                if [[ "$ans" =~ ^[Yy]$ ]]; then
+                    local updated
+                    updated=$(jq --argjson entry "$vscode_entry" '.servers.luamemo = $entry' "$vscode_mcp")
+                    printf '%s\n' "$updated" > "$vscode_mcp"
+                    echo "  Updated: $vscode_mcp"
+                fi
+            fi
+        else
+            echo -n "  Create .vscode/mcp.json with luamemo entry? [y/N] "
+            local ans; read -r ans
+            if [[ "$ans" =~ ^[Yy]$ ]]; then
+                mkdir -p "$vscode_dir"
+                jq -n --argjson entry "$vscode_entry" '{"servers":{"luamemo":$entry}}' > "$vscode_mcp"
+                echo "  Created: $vscode_mcp"
+            fi
+        fi
+    fi
+
+    # ── Cursor (~/.cursor/mcp.json) ──────────────────────────────────────
+    local cursor_mcp="${HOME}/.cursor/mcp.json"
+    if [[ -d "${HOME}/.cursor" ]]; then
+        echo "  Detected: Cursor (~/.cursor/ found)"
+        if [[ -f "$cursor_mcp" ]]; then
+            local already
+            already=$(jq -r '.mcpServers.luamemo // empty' "$cursor_mcp" 2>/dev/null || echo "")
+            if [[ -n "$already" ]]; then
+                echo "  ~/.cursor/mcp.json: luamemo entry already present — skipping."
+            else
+                echo -n "  Write luamemo MCP entry to ~/.cursor/mcp.json? [y/N] "
+                local ans; read -r ans
+                if [[ "$ans" =~ ^[Yy]$ ]]; then
+                    local updated
+                    updated=$(jq --argjson entry "$claude_entry" '.mcpServers.luamemo = $entry' "$cursor_mcp")
+                    printf '%s\n' "$updated" > "$cursor_mcp"
+                    echo "  Updated: $cursor_mcp"
+                fi
+            fi
+        else
+            echo -n "  Create ~/.cursor/mcp.json with luamemo entry? [y/N] "
+            local ans; read -r ans
+            if [[ "$ans" =~ ^[Yy]$ ]]; then
+                jq -n --argjson entry "$claude_entry" '{"mcpServers":{"luamemo":$entry}}' > "$cursor_mcp"
+                echo "  Created: $cursor_mcp"
+            fi
+        fi
+    fi
+
+    # ── Claude Desktop ───────────────────────────────────────────────────
+    local claude_cfg=""
+    if [[ "$(uname)" == "Darwin" ]]; then
+        claude_cfg="${HOME}/Library/Application Support/Claude/claude_desktop_config.json"
+    else
+        claude_cfg="${HOME}/.config/Claude/claude_desktop_config.json"
+    fi
+    if [[ -f "$claude_cfg" ]]; then
+        echo "  Detected: Claude Desktop (${claude_cfg})"
+        local already
+        already=$(jq -r '.mcpServers.luamemo // empty' "$claude_cfg" 2>/dev/null || echo "")
+        if [[ -n "$already" ]]; then
+            echo "  claude_desktop_config.json: luamemo entry already present — skipping."
+        else
+            echo -n "  Write luamemo MCP entry to Claude Desktop config? [y/N] "
+            local ans; read -r ans
+            if [[ "$ans" =~ ^[Yy]$ ]]; then
+                local updated
+                updated=$(jq --argjson entry "$claude_entry" '.mcpServers.luamemo = $entry' "$claude_cfg")
+                printf '%s\n' "$updated" > "$claude_cfg"
+                echo "  Updated: $claude_cfg"
+            fi
+        fi
+    fi
+
+    # ── Nothing detected — print manual instructions ─────────────────────
+    if [[ "$has_vscode" != "true" ]] && [[ ! -d "${HOME}/.cursor" ]] && [[ ! -f "$claude_cfg" ]]; then
+        echo "  No IDE config detected. Add this to your MCP client config manually:"
+        echo ""
+        echo "  VS Code (.vscode/mcp.json):"
+        jq -n --argjson entry "$vscode_entry" '{"servers":{"luamemo":$entry}}' | sed 's/^/    /'
+        echo ""
+        echo "  Claude Desktop / Cursor (mcpServers block):"
+        jq -n --argjson entry "$claude_entry" '{"mcpServers":{"luamemo":$entry}}' | sed 's/^/    /'
+    fi
+
+    echo ""
+    echo "  Note: memory.setup() and routes.register() are only needed if your"
+    echo "  application code calls store.write/search in-process, or you want"
+    echo "  the /api/memory HTTP routes available to non-MCP clients."
+    echo "  For Copilot Agent Mode, Cursor, or Claude Desktop using MEMO_DB_URL,"
+    echo "  the MCP server above handles everything — no setup() call required."
+    echo ""
 }
 
 cmd_local_lua() {

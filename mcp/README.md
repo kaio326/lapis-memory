@@ -1,8 +1,18 @@
 # luamemo MCP server
 
 A pure-Lua [Model Context Protocol](https://modelcontextprotocol.io/) stdio
-server that bridges MCP clients (Claude Desktop, Cursor, Continue.dev,
-Copilot Agent Mode, …) to a running `luamemo` HTTP API.
+server that gives AI clients (Claude Desktop, Cursor, Continue.dev,
+Copilot Agent Mode, …) direct access to the luamemo memory store.
+
+It operates in two modes — choose the one that fits your setup:
+
+| Mode | How it connects | When to use |
+|------|----------------|-------------|
+| **Direct DB** (`MEMO_DB_URL`) | Connects to PostgreSQL directly — no running HTTP server required | Standalone use: AI agent only, or plain Lua app without Lapis |
+| **HTTP API** (`MEMO_URL`) | Calls your running Lapis/HTTP app's `/api/memory` routes | When you want the agent to go through your app's `auth_fn` and middleware |
+
+For most users the direct-DB mode is the right choice — it requires only
+PostgreSQL and the `luamemo` library.
 
 Once installed, your AI assistant can call eleven tools:
 
@@ -29,16 +39,14 @@ VS Code "Invalid string length" overflow on very long sessions.
 
 - **Lua 5.1+** or **LuaJIT** (whichever is on your `$PATH` as `lua`)
 - **lua-cjson** (`luarocks install lua-cjson`)
-- **curl** — preinstalled on macOS, Linux, modern Windows
-- A reachable `luamemo` HTTP API (see the project root README)
+- **PostgreSQL 15+** with the luamemo schema applied (direct-DB mode)
+  — or a running `luamemo` HTTP API (HTTP mode)
 
-> ### HTTP transport note
-> The MCP server shells out to `curl` for its HTTP calls to the
-> `luamemo` API. `curl` is preinstalled on macOS, Linux, and modern
-> Windows. The library itself uses `luamemo.http` (LuaSocket-backed in
-> plain Lua) for embedder/reranker calls, but the MCP server keeps the
-> separate `curl` path to avoid requiring `luasocket` as a hard dependency
-> for users who only want the MCP server.
+> ### `curl` dependency (HTTP mode only)
+> When using `MEMO_URL` (HTTP mode), the MCP server shells out to `curl`
+> for its HTTP calls. `curl` is preinstalled on macOS, Linux, and modern
+> Windows. In direct-DB mode (`MEMO_DB_URL`) no `curl` is needed — all
+> calls go through `luamemo.db` / pgmoon directly.
 
 ---
 
@@ -64,6 +72,11 @@ You should get a one-line JSON response containing `serverInfo` and
 
 ## Configure your client
 
+All examples below show the **direct-DB mode** (`MEMO_DB_URL`), which is the
+simplest setup — no running HTTP server required. To use HTTP mode instead,
+replace `MEMO_DB_URL` with `MEMO_URL` (and optionally `MEMO_TOKEN` for auth).
+See [Transport modes](#transport-modes) for the trade-offs.
+
 ### Claude Desktop
 
 Edit `claude_desktop_config.json`:
@@ -79,9 +92,8 @@ Edit `claude_desktop_config.json`:
       "command": "lua",
       "args": ["/absolute/path/to/luamemo/mcp/server.lua"],
       "env": {
-        "MEMO_URL":   "https://app.example.com/api/memory",
-        "MEMO_TOKEN": "your-bearer-token",
-        "MEMO_SCOPE": "global"
+        "MEMO_DB_URL": "postgresql://user:pass@localhost:5432/mydb",
+        "MEMO_SCOPE":  "global"
       }
     }
   }
@@ -107,9 +119,8 @@ experimental:
         command: lua
         args: ["/absolute/path/to/luamemo/mcp/server.lua"]
         env:
-          MEMO_URL:   https://app.example.com/api/memory
-          MEMO_TOKEN: your-bearer-token
-          MEMO_SCOPE: global
+          MEMO_DB_URL: postgresql://user:pass@localhost:5432/mydb
+          MEMO_SCOPE:  global
 ```
 
 ### Copilot Agent Mode (VS Code)
@@ -124,9 +135,8 @@ Add to `.vscode/mcp.json` in your workspace:
       "command": "lua",
       "args": ["/absolute/path/to/luamemo/mcp/server.lua"],
       "env": {
-        "MEMO_URL":   "https://app.example.com/api/memory",
-        "MEMO_TOKEN": "your-bearer-token",
-        "MEMO_SCOPE": "repo:my-project"
+        "MEMO_DB_URL": "postgresql://user:pass@localhost:5432/mydb",
+        "MEMO_SCOPE":  "repo:my-project"
       }
     }
   }
@@ -137,16 +147,72 @@ Add to `.vscode/mcp.json` in your workspace:
 
 ## Environment variables
 
+### Direct-DB mode
+
 | Variable | Required | Purpose |
 |---|---|---|
-| `MEMO_URL`   | yes | Base URL of the luamemo HTTP API |
+| `MEMO_DB_URL` | yes | PostgreSQL connection URL — `postgresql://user:pass@host:5432/db` |
+| `MEMO_SCOPE`  | no  | Default scope when a tool call omits `scope` |
+| `MEMO_MASTER_KEY`    | no | 64-hex-char AES-256 master key for encrypted secrets |
+| `MEMO_SECRETS_FILE`  | no | Writable path for the encrypted secrets JSON file — both `MEMO_MASTER_KEY` and `MEMO_SECRETS_FILE` must be set to enable secrets |
+| `MEMO_DEBUG`  | no  | Set to `1` to log raw JSON-RPC frames to stderr |
+
+### HTTP mode
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `MEMO_URL`   | yes | Base URL of the luamemo HTTP API — e.g. `https://app.example.com/api/memory` |
 | `MEMO_TOKEN` | no  | Bearer token sent as `Authorization: Bearer <token>` |
-| `MEMO_SCOPE` | no  | Default scope used when a tool call omits `scope` |
+| `MEMO_SCOPE` | no  | Default scope when a tool call omits `scope` |
 | `MEMO_DEBUG` | no  | Set to `1` to log raw JSON-RPC frames to stderr |
 
 `MEMO_SCOPE` is the simplest way to point one MCP server instance at one
 project — set it to `repo:my-project` and every write/search defaults to
 that bucket without the model having to remember.
+
+---
+
+## Transport modes
+
+### Direct DB (`MEMO_DB_URL`) — recommended for most users
+
+The MCP server calls `luamemo.db` / pgmoon directly. No running HTTP
+server required. This is the right choice when:
+
+- You only need AI agent access to memory (not your app code)
+- You are using a standalone Lua script, CLI tool, or eval harness
+- You want the simplest possible setup
+
+`memory.setup()` and `routes.register()` are **not needed** in this mode.
+The MCP server calls `luamemo.setup()` internally using `MEMO_DB_URL`.
+
+### HTTP API (`MEMO_URL`) — use when auth matters
+
+The MCP server calls your running Lapis (or any HTTP) app's
+`/api/memory` routes via `curl`. Use this when:
+
+- You want the AI agent to go through the same `auth_fn`, rate-limiter,
+  or CSRF hook that protects your app's other routes
+- Your Lapis app code also calls `store.write()` in-process and you want
+  a single, authoritative request path
+- You run multiple agents sharing one app and need per-agent token auth
+
+In this mode you **do** need `memory.setup()` and `routes.register()` in
+your Lapis app, and the app must be running when the MCP server is active.
+
+### Using both together (Lapis apps)
+
+For a Lapis app, the common combination is:
+
+- `memory.setup()` + `routes.register(app)` — for in-process use by your
+  app code (e.g. auto-capturing messages via `luamemo.hooks`) and for
+  non-MCP HTTP clients
+- MCP server with `MEMO_URL` pointing at your Lapis routes — when you
+  want the AI agent's writes to pass through `auth_fn`
+- MCP server with `MEMO_DB_URL` — when you want the AI agent to have
+  direct DB access independent of your app's auth layer
+
+All three can coexist — they write to the same PostgreSQL tables.
 
 ---
 

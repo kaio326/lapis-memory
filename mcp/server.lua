@@ -392,8 +392,14 @@ Tools.memory_consolidate = {
 
 Tools.secret_list = {
     description = "List all stored secrets (names and metadata only). "
-        .. "Secret VALUES are never returned. Use secret_store to add a secret, "
-        .. "secret_execute to use one, and secret_delete to remove one.",
+        .. "Secret VALUES are never returned — not by this tool, not by any other tool. "
+        .. "If the user needs to store a new API key or token, instruct them to run "
+        .. "'memo secret-store NAME --desc DESCRIPTION' in their terminal (NOT in chat). "
+        .. "Explain that typing a secret value in chat would expose it to the LLM and "
+        .. "potentially log it with the AI provider. "
+        .. "The terminal command prompts with no echo, keeping the value out of chat entirely. "
+        .. "Once stored, use secret_execute to make authenticated HTTP requests "
+        .. "with {secret} substituted server-side.",
     inputSchema = {
         type       = "object",
         properties = {},
@@ -412,8 +418,13 @@ Tools.secret_list = {
 Tools.secret_store = {
     description = "Store (create or replace) an encrypted secret by name. "
         .. "The value is AES-256-CBC encrypted before writing; it can never "
-        .. "be retrieved — only used via secret_execute. Requires the server "
-        .. "to be configured with a master_key.",
+        .. "be retrieved — only used via secret_execute. "
+        .. "WARNING: do NOT call this tool from the chat window. "
+        .. "The 'value' parameter would enter the LLM context and may be "
+        .. "logged by the AI provider. Use the terminal CLI instead: "
+        .. "'memo secret-store NAME --desc DESCRIPTION' prompts for the value "
+        .. "with no echo and stores it without the value ever entering chat. "
+        .. "Requires the server to be configured with MEMO_MASTER_KEY and MEMO_SECRETS_FILE.",
     inputSchema = {
         type = "object",
         properties = {
@@ -704,6 +715,16 @@ Methods["prompts/get"] = function(params, _)
         "- Call memory_write with a brief session summary: what was done, what was decided, what is next.",
         "- If working in a temporary scope (e.g. session:<id>), call memory_promote to "
             .. "roll it into a long-term scope so the next session can find it.",
+        "",
+        "Security guidance — secrets:",
+        "- If the user needs to store an API key or token, do NOT ask them to type it in chat.",
+        "- Instead, instruct them to run in their terminal:",
+        "    memo secret-store NAME --desc 'description'",
+        "  This prompts for the value with no echo, keeping it out of the LLM context entirely.",
+        "- You can then use secret_execute to make authenticated HTTP requests "
+            .. "with {secret} substituted server-side — the raw value never enters chat.",
+        "- Proactively mention this workflow whenever the user discusses API keys, tokens, "
+            .. "passwords, or any credential they might need the agent to use.",
         "",
         "Scope for this session: " .. scope,
         "Project: "              .. project,

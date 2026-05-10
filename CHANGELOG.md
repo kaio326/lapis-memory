@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.2.6 — 2026-05-09
+
+- **`memo calibrate` auto-bootstrap — Phase 2.5 (schema check + apply).**
+  `calibrate` now calls the new `schema-check` API command (which queries
+  `information_schema.columns`) to verify that both `lm_memories` and
+  `lm_kg_facts` are present with all expected columns. If incomplete, it
+  shows what is missing, checks for `psql`, prompts `Apply schema now? [y/N]`,
+  and runs `cmd_migrate | psql` automatically. New flag: `--no-migrate` skips
+  this phase.
+
+- **`memo calibrate` IDE/MCP detection — Phase 5.**
+  After codebase ingest, `calibrate` now detects `.vscode/`, `~/.cursor/`,
+  and the Claude Desktop config path (platform-aware). For each detected IDE
+  it offers to write or update the MCP config file with a pre-built
+  `luamemo` server entry (direct DB mode via `MEMO_DB_URL`). New helper:
+  `_calibrate_mcp_phase()`. New flag: `--no-mcp` skips this phase.
+
+- **`luamemo.cli.api` — `schema-check` command.**
+  New handler queries `information_schema.columns` for `lm_memories` and
+  `lm_kg_facts`, returns `{ ok, tables: { <tbl>: { present, missing_cols } } }`.
+  Used internally by `calibrate` Phase 2.5.
+
+- **MCP server — proactive secrets security guidance.**
+  `secret_store` tool description now includes an explicit WARNING against
+  asking users to paste credentials in chat, and instructs the agent to
+  recommend the `memo secret-store NAME` terminal workflow instead.
+  `secret_list` description similarly guides agents to suggest the terminal
+  workflow when a user needs to store a new key.
+  `session_start` prompt text now includes a "Security guidance — secrets"
+  section so agents carry this behaviour from the very start of every session:
+  never ask for credentials in chat; always redirect to the terminal command;
+  proactively raise the topic when API keys or tokens are discussed.
+
+- **Documentation — transport modes and access paths.**
+  `mcp/README.md`: opening two-mode decision table (Direct DB vs HTTP API),
+  "most users want direct DB" recommendation, split env-var table, new
+  Transport modes section.
+  `README.md`: access-path decision table before the setup steps; callout
+  for Copilot/Cursor/Claude Desktop users; `--no-migrate`/`--no-mcp` flags
+  documented; `memo secret-store` example corrected to use
+  `MEMO_DB_URL`/`MEMO_MASTER_KEY`/`MEMO_SECRETS_FILE` (was showing HTTP
+  transport vars by mistake).
+
 ## 0.2.5 — 2026-05-09
 
 - **LSH ANN backend (`luamemo/lsh.lua`) — new module.**

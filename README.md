@@ -175,6 +175,23 @@ required. LSH activates automatically once a scope's corpus exceeds
 ---
 ## 5-minute setup
 
+### Choose your access path
+
+Before installing, pick the path that matches your use case. They are
+orthogonal and can be combined.
+
+| What you want | What you need | What you can skip |
+|---|---|---|
+| **AI agent memory only** (Copilot, Cursor, Claude Desktop) | PostgreSQL + `memo calibrate` + MCP config | `memory.setup()`, HTTP routes, Lapis |
+| **In-app memory** (your Lua code calls `store.write` / `store.search`) | `memory.setup()` | MCP server |
+| **Both** (app code + AI agent through your auth layer) | `memory.setup()` + `routes.register()` + MCP server with `MEMO_URL` | — |
+| **Both** (app code + AI agent with direct DB access) | `memory.setup()` + MCP server with `MEMO_DB_URL` | HTTP routes |
+
+> **Using Copilot Agent Mode, Cursor, or Claude Desktop?**
+> Run `memo calibrate` — it applies the schema, detects your IDE, and writes
+> the MCP config for you. You do not need to wire `memory.setup()` or
+> `routes.register()` unless your application code also needs the HTTP routes.
+
 ### 1. Database
 
 **Default (zero infra):** any PostgreSQL 15+. No extension required.
@@ -210,6 +227,11 @@ See [examples/local_hash_embedder.md](examples/local_hash_embedder.md).
   ```
 
 ### 3. Wire into your Lapis app
+
+> **Only needed if** your application code calls `store.write()` /
+> `store.search()` in-process, or you want the `/api/memory` HTTP routes
+> available. For AI-agent-only use (Copilot, Cursor, Claude Desktop) you
+> can skip to the MCP section below.
 
 ```lua
 local lapis  = require("lapis")
@@ -437,7 +459,8 @@ if memory.secrets.enabled() then ... end
 > **These are not terminal commands.** You type them in the chat window of your
 > AI assistant (Claude Desktop, Copilot Agent Mode, Cursor, Continue.dev, etc.)
 > while the MCP server is connected. The assistant recognises them as tool calls
-> and executes them against the running luamemo HTTP API.
+> and executes them via the MCP server (which connects to PostgreSQL directly
+> or through your HTTP API, depending on your transport configuration).
 
 Three tools are safe to call from the chat window (no raw values involved):
 
@@ -461,8 +484,10 @@ in the chat context:
 
 ```bash
 # Prompted, no echo — safest
-export MEMO_URL=https://your-app.example.com/api/memory
-export MEMO_TOKEN=your-bearer-token   # if auth is enabled
+# memo secret-store talks to the DB directly (not HTTP) — set these env vars:
+export MEMO_DB_URL=postgresql://user:pass@localhost:5432/mydb
+export MEMO_MASTER_KEY=<64-hex-char key>   # or set MEMO_SECRETS_FILE + MEMO_MASTER_KEY
+export MEMO_SECRETS_FILE=/app/data/lm_secrets.json
 
 memo secret-store openai-key --desc "OpenAI API key"
 # Secret value for "openai-key": ████████  (hidden, no echo)
@@ -474,7 +499,8 @@ Or read the value from a file (e.g. a password manager export):
 memo secret-store openai-key --file ~/.secrets/openai-key.txt --desc "OpenAI API key"
 ```
 
-Or call the HTTP API directly from the terminal (value stays in your terminal, never in chat):
+Or call the HTTP API directly from the terminal if you use the HTTP-mode setup
+(value stays in your terminal, never in chat):
 
 ```bash
 curl -sS -X POST "$MEMO_URL/secrets" \

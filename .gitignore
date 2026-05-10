@@ -13,8 +13,7 @@ eval/*.json
 dev/.env
 
 # Local secrets — never commit
-.github/copilot-sec
-.github/copilot-prompts
+.github/
 secrets/
 .env
 .env.backup
