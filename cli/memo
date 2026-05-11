@@ -20,7 +20,7 @@
 #                    [--decay-threshold F] [--max-rows N]
 #   memo calibrate [--scope SCOPE] [--root DIR] [--no-git] [--no-comments] [--dry-run]
 #                  [--probe-only] [--multilingual] [--long] [--hosted] [--allow-hash]
-#                  [--write PATH] [--no-migrate] [--no-mcp]
+#                  [--write PATH] [--no-migrate] [--no-mcp] [--docker-compose FILE]
 #   memo secret-store  NAME [--desc DESCRIPTION] [--file PATH]
 #   memo secret-list
 #   memo secret-delete NAME
@@ -28,6 +28,7 @@
 #                               [--form FIELD=VALUE]... [--form-file FIELD:PATH]
 #                               [--timeout-ms N]
 #   memo migrate         Print all luamemo migration SQL to stdout (pipe to psql)
+#   memo ping    [--db] [--table] [--embedder]  Connectivity check (exit 0/1)
 #   memo doctor  [--setup PATH] [--json]
 
 set -euo pipefail
@@ -456,11 +457,93 @@ cmd_consolidate() {
 }
 
 # ---------------------------------------------------------------------------
+# Docker Compose Postgres credential reader
+# Used by --docker-compose FILE flag in cmd_calibrate.
+# Parses a docker-compose.yml for Postgres credentials and host port,
+# then exports MEMO_DB_URL.
+# ---------------------------------------------------------------------------
+_parse_compose_pg() {
+    local file="$1"
+    if [[ ! -f "$file" ]]; then
+        echo "memo calibrate: --docker-compose: file not found: $file" >&2
+        return 1
+    fi
+
+    local pg_user="" pg_pass="" pg_db="" pg_port=""
+    local in_pg_service=false in_environment=false
+
+    while IFS= read -r line; do
+        # Detect a service whose image contains "postgres"
+        if [[ "$line" =~ ^[[:space:]]+image:[[:space:]].*postgres ]]; then
+            in_pg_service=true
+            in_environment=false
+        fi
+        # Detect a new 2-indent service name line (reset if leaving pg service)
+        if [[ "$in_pg_service" == true ]] && \
+           [[ "$line" =~ ^[[:space:]]{2}[a-zA-Z][a-zA-Z0-9_-]*:[[:space:]]*$ ]]; then
+            # Only reset if we've already entered the pg service block
+            # (any new 2-space service after the pg one ends its scope)
+            in_pg_service=false
+            in_environment=false
+        fi
+        if [[ "$in_pg_service" == true ]]; then
+            # Begin of environment: block
+            if [[ "$line" =~ ^[[:space:]]+environment:[[:space:]]*$ ]]; then
+                in_environment=true
+                continue
+            fi
+            # End of environment: section when another key at the same indent level appears
+            if [[ "$in_environment" == true ]] && \
+               [[ "$line" =~ ^[[:space:]]{4}[a-zA-Z] ]] && \
+               ! [[ "$line" =~ POSTGRES_ ]]; then
+                in_environment=false
+            fi
+            if [[ "$in_environment" == true ]]; then
+                # Support both "  - KEY=VALUE" list form and "KEY: VALUE" map form
+                local stripped="${line#"${line%%[! ]*}"}"   # ltrim
+                if [[ "$stripped" =~ ^-[[:space:]]POSTGRES_USER=(.*)$ ]]; then
+                    pg_user="${BASH_REMATCH[1]}"
+                elif [[ "$stripped" =~ ^POSTGRES_USER:[[:space:]]*(.*)$ ]]; then
+                    pg_user="${BASH_REMATCH[1]}"
+                fi
+                if [[ "$stripped" =~ ^-[[:space:]]POSTGRES_PASSWORD=(.*)$ ]]; then
+                    pg_pass="${BASH_REMATCH[1]}"
+                elif [[ "$stripped" =~ ^POSTGRES_PASSWORD:[[:space:]]*(.*)$ ]]; then
+                    pg_pass="${BASH_REMATCH[1]}"
+                fi
+                if [[ "$stripped" =~ ^-[[:space:]]POSTGRES_DB=(.*)$ ]]; then
+                    pg_db="${BASH_REMATCH[1]}"
+                elif [[ "$stripped" =~ ^POSTGRES_DB:[[:space:]]*(.*)$ ]]; then
+                    pg_db="${BASH_REMATCH[1]}"
+                fi
+            fi
+            # ports: "HOST_PORT:5432"
+            if [[ "$line" =~ ([0-9]+):5432 ]]; then
+                pg_port="${BASH_REMATCH[1]}"
+            fi
+        fi
+    done < "$file"
+
+    pg_user="${pg_user:-postgres}"
+    pg_db="${pg_db:-luamemo}"
+    pg_port="${pg_port:-5432}"
+
+    if [[ -z "$pg_pass" ]]; then
+        echo "memo calibrate: --docker-compose: POSTGRES_PASSWORD not found in $file" >&2
+        echo "  Set MEMO_DB_URL manually or add POSTGRES_PASSWORD to the Compose file." >&2
+        return 1
+    fi
+
+    export MEMO_DB_URL="postgresql://${pg_user}:${pg_pass}@localhost:${pg_port}/${pg_db}"
+    echo "  Docker Compose: detected Postgres → MEMO_DB_URL=${MEMO_DB_URL//:${pg_pass}@/:***@}"
+}
+
+# ---------------------------------------------------------------------------
 # memo calibrate — three-phase host probe, corpus health check, codebase ingest.
 # ---------------------------------------------------------------------------
 cmd_calibrate() {
     local root="." scope="" dry_run=false no_git=false no_comments=false probe_only=false
-    local no_migrate=false no_mcp=false
+    local no_migrate=false no_mcp=false dc_file=""
     local lua_extra_flags=""
 
     while [[ $# -gt 0 ]]; do
@@ -473,6 +556,7 @@ cmd_calibrate() {
             --probe-only)  probe_only=true;  shift   ;;
             --no-migrate)  no_migrate=true;  shift   ;;
             --no-mcp)      no_mcp=true;      shift   ;;
+            --docker-compose) dc_file="$2";  shift 2 ;;
             --non-interactive|--multilingual|--long|--hosted|--allow-hash)
                 lua_extra_flags+="[==[${1}]==],"; shift ;;
             --write)
@@ -487,6 +571,11 @@ cmd_calibrate() {
     }
 
     # ── Phase 1: host probe + embedder recommendation (no DB required) ──────
+    # Apply --docker-compose credentials before probe so they're visible in output.
+    if [[ -n "$dc_file" ]]; then
+        _parse_compose_pg "$dc_file" || true
+    fi
+
     "$lua" -e "require('luamemo.cli.calibrate').run({[==[--root]==],[==[${root}]==],${lua_extra_flags}})"
     [[ "$probe_only" == true ]] && return 0
 
@@ -718,13 +807,32 @@ _calibrate_mcp_phase() {
     # Strategy 4: fall back to the relative path; warn below if it doesn't exist.
     [[ -z "$mcp_server" ]] && mcp_server="$_rel"
 
-    # Warn early if the server file still can't be found.
+    # Block if the server file still can't be found — writing a broken path
+    # into the MCP client config causes silent failures that are hard to debug.
     if [[ ! -f "$mcp_server" ]]; then
         echo ""
         echo "  WARNING: mcp/server.lua not found at:"
         echo "    $mcp_server"
-        echo "  Edit the 'args' field in the generated config to the correct path."
-        echo "  Typical location: <luarocks-prefix>/lib/luarocks/rocks-5.1/luamemo/<ver>/mcp/server.lua"
+        if [[ -t 0 ]]; then
+            echo -n "  Enter the correct path to mcp/server.lua (or press Enter to skip MCP config): "
+            local _user_path; read -r _user_path
+            if [[ -z "$_user_path" ]]; then
+                echo "  Skipping MCP config write (no valid server path)."
+                echo "  To configure manually, set 'args' in your MCP client config to"
+                echo "  the path of mcp/server.lua from the luamemo LuaRocks installation."
+                return 0
+            elif [[ -f "$_user_path" ]]; then
+                mcp_server="$_user_path"
+            else
+                echo "  Path does not exist: $_user_path"
+                echo "  Skipping MCP config write."
+                return 0
+            fi
+        else
+            echo "  Non-interactive: skipping MCP config write."
+            echo "  Typical location: <luarocks-prefix>/lib/luarocks/rocks-5.1/luamemo/<ver>/mcp/server.lua"
+            return 0
+        fi
     fi
 
     local db_url="${MEMO_DB_URL:-}"
@@ -922,7 +1030,8 @@ case "$sub" in
     secret-delete)  cmd_secret_delete  "$@" ;;
     secret-execute) cmd_secret_execute "$@" ;;
     migrate) cmd_migrate ;;
-    doctor)  cmd_local_lua doctor "$@" ;;
+    ping)    cmd_local_lua ping    "$@" ;;
+    doctor)  cmd_local_lua doctor  "$@" ;;
     -h|--help|help) usage ;;
     *) echo "memo: unknown subcommand: $sub" >&2; usage ;;
 esac

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.9 — 2026-05-11
+
+- **`memo ping` — standalone connectivity check.**
+  New subcommand that tests DB connection, table existence, and embedder
+  reachability independently, without requiring `luamemo.setup()`. Exits 0
+  if all checks pass, 1 if any fail. Suitable for CI healthchecks.
+  Flags: `--db`, `--table`, `--embedder`.
+
+- **`memo calibrate --docker-compose FILE` — read Postgres credentials from Compose file.**
+  New flag that parses a `docker-compose.yml` file to extract Postgres
+  credentials (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, host port)
+  and sets `MEMO_DB_URL` automatically, eliminating manual credential copying.
+
+- **`memo calibrate` — block MCP config write when server path unresolvable.**
+  Previously `calibrate` warned about a missing `mcp/server.lua` path but
+  still wrote the broken config. Now it prompts interactively for the correct
+  path, or skips the write entirely in non-interactive mode.
+
 ## 0.2.8 — 2026-05-11
 
 - **`memo doctor` crash fix.**

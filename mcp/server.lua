@@ -33,7 +33,7 @@ local DEBUG       = os.getenv("MEMO_DEBUG") == "1"
 
 local PROTOCOL_VERSION = "2024-11-05"
 local SERVER_NAME      = "luamemo"
-local SERVER_VERSION   = "0.2.8"
+local SERVER_VERSION   = "0.2.9"
 
 -- ===========================================================================
 -- Logging (stderr only — stdout is reserved for JSON-RPC frames)
