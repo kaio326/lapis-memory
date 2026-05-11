@@ -37,7 +37,7 @@
 --   --allow-hash        permit the hash fallback
 --   --write PATH        also write the config snippet to PATH
 
-local cjson     = require("cjson.safe")
+local json      = require("luamemo.json")
 local probe     = require("luamemo.cli.probe")
 local recommend = require("luamemo.cli.recommend")
 local util      = require("luamemo.util")
@@ -73,7 +73,7 @@ local function emit(scope, kind, title, body, importance, tags, meta)
     if not title or trim(title) == "" then return end
     body = trim(body or "")
     if #body < 20 then return end   -- skip trivial stubs
-    print(cjson.encode({
+    print(json.encode({
         scope          = scope,
         kind           = kind or "fact",
         title          = trim(title):sub(1, 200),

@@ -34,7 +34,7 @@
 
 local M = {}
 
-local cjson = require("cjson.safe")
+local json  = require("luamemo.json")
 local util  = require("luamemo.util")
 
 -- ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ end
 local function read_json_stdin()
     local raw = io.read("*a")
     if not raw or raw:match("^%s*$") then return {} end
-    local t, err = cjson.decode(raw)
+    local t, err = json.decode(raw)
     if not t then
         io.stderr:write("api: invalid JSON on stdin: " .. tostring(err) .. "\n")
         return {}
@@ -86,7 +86,7 @@ local function read_json_stdin()
 end
 
 local function out(t)
-    io.write(cjson.encode(t) .. "\n")
+    io.write(json.encode(t) .. "\n")
     io.flush()
 end
 
@@ -130,7 +130,7 @@ handlers["write-many"] = function(_p)
     for line in io.lines() do
         line = line:match("^%s*(.-)%s*$") -- trim
         if line ~= "" then
-            local p, jerr = cjson.decode(line)
+            local p, jerr = json.decode(line)
             if not p then
                 io.stderr:write("write-many: bad JSON line: " .. tostring(jerr) .. "\n")
                 errors = errors + 1
@@ -153,7 +153,7 @@ handlers["write-many"] = function(_p)
                 else
                     written = written + 1
                     -- stream each result as NDJSON for progress reporting
-                    io.write(cjson.encode({ ok = true, memory = row, action = action }) .. "\n")
+                    io.write(json.encode({ ok = true, memory = row, action = action }) .. "\n")
                     io.flush()
                 end
             end

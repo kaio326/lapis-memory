@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.7 — 2026-05-11
+
+- **`lua-cjson` is now an optional dependency.**
+  `luamemo.json` (new module) is a portable JSON shim: it tries `cjson.safe`
+  first (always present in OpenResty / LuaJIT environments, zero overhead),
+  then falls back to the bundled `luamemo.vendor.dkjson` (dkjson 2.5,
+  pure Lua, MIT). This means `luarocks install luamemo` now succeeds on
+  minimal Alpine images and CI runners that lack a C compiler. All library
+  modules now `require("luamemo.json")` instead of `require("cjson.safe")`.
+
+- **Bundled `luamemo/vendor/dkjson.lua`.**
+  Verbatim copy of dkjson 2.5 (David Kolf, MIT). Used only when `cjson.safe`
+  is not available. No modifications — SHA-256:
+  `9d3e5c82dcd572a6a4b764d705f72b948094124b0e338cec0d6dfefea59693b7`.
+
+- **`luamemo/json.lua` shim.**
+  `pcall(require, "cjson.safe")` + type-table guard to detect a live module
+  (Lua 5.1's `require` returns `true` for nil-returning loaders, so a simple
+  truthy check is insufficient). `decode()` wraps dkjson's three-return-value
+  signature into the `nil, err` contract used throughout the library.
+
 ## 0.2.6 — 2026-05-09
 
 - **`memo calibrate` auto-bootstrap — Phase 2.5 (schema check + apply).**

@@ -12,7 +12,7 @@
 -- Default below is "search_document"; override via cfg.embedder_input_type
 -- if you wire a separate query-time embedder.
 
-local cjson = require("cjson.safe")
+local json = require("luamemo.json")
 
 return {
     extra_headers = {},
@@ -20,7 +20,7 @@ return {
     url = function(cfg) return cfg.embedder_url end,
 
     build_request = function(text, cfg)
-        return cjson.encode({
+        return json.encode({
             model           = cfg.embedder_model or "embed-english-v3.0",
             texts           = { text },
             input_type      = cfg.embedder_input_type or "search_document",

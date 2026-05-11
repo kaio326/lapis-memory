@@ -5,7 +5,7 @@
 --   embedder_model = "text-embedding-3-small"
 --   embedder_headers = { Authorization = "Bearer " .. os.getenv("OPENAI_API_KEY") }
 
-local cjson = require("cjson.safe")
+local json = require("luamemo.json")
 
 return {
     extra_headers = {},
@@ -13,7 +13,7 @@ return {
     url = function(cfg) return cfg.embedder_url end,
 
     build_request = function(text, cfg)
-        return cjson.encode({
+        return json.encode({
             model = cfg.embedder_model or "text-embedding-3-small",
             input = text,
         })

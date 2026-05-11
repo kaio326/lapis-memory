@@ -2,7 +2,7 @@
 -- Contract:
 --   POST <embedder_url>  { "text": "..." }  -> { "vector": [...] }
 
-local cjson = require("cjson.safe")
+local json = require("luamemo.json")
 
 return {
     extra_headers = {},
@@ -10,7 +10,7 @@ return {
     url = function(cfg) return cfg.embedder_url end,
 
     build_request = function(text, cfg)
-        return cjson.encode({ text = text })
+        return json.encode({ text = text })
     end,
 
     parse_response = function(payload, cfg)

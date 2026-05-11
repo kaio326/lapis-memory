@@ -2,7 +2,7 @@
 -- Persistence + retrieval. Uses luamemo.db for raw SQL.
 
 local db    = require("luamemo.db")
-local cjson = require("cjson.safe")
+local json  = require("luamemo.json")
 local embed = require("luamemo.embed")
 local util  = require("luamemo.util")
 
@@ -134,7 +134,7 @@ local function pg_array(arr)
 end
 
 local function as_jsonb(t)
-    return db.interpolate_query("?::jsonb", cjson.encode(t or {}))
+    return db.interpolate_query("?::jsonb", json.encode(t or {}))
 end
 
 -- Validate a numeric weight against [lo, hi].  Delegates to util.

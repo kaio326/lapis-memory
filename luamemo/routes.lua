@@ -7,7 +7,7 @@
 -- Redis-backed limiter. The library does not add a stateful dependency for
 -- this — it belongs in the deployment layer.
 
-local cjson = require("cjson.safe")
+local jlib  = require("luamemo.json")
 local util  = require("luamemo.util")
 
 local M = {}
@@ -32,8 +32,8 @@ local function decode_body(self)
         ngx.req.read_body()
         local raw = ngx.req.get_body_data()
         if raw and raw ~= "" then
-            local ok, parsed = pcall(cjson.decode, raw)
-            if ok and type(parsed) == "table" then
+            local parsed = jlib.decode(raw)
+            if type(parsed) == "table" then
                 for k, v in pairs(parsed) do p[k] = v end
             end
         end
@@ -326,14 +326,14 @@ function M.register(app, opts)
         local headers = p.headers
         if type(headers) == "string" then
             -- Allow JSON-encoded headers from form posts
-            local decoded, derr = cjson.decode(headers)
+            local decoded, derr = jlib.decode(headers)
             if decoded then headers = decoded
             else return json(400, { error = "headers must be a JSON object: " .. tostring(derr) })
             end
         end
         local multipart = p.multipart
         if type(multipart) == "string" then
-            local decoded, derr = cjson.decode(multipart)
+            local decoded, derr = jlib.decode(multipart)
             if decoded then multipart = decoded
             else return json(400, { error = "multipart must be a JSON object: " .. tostring(derr) })
             end

@@ -9,7 +9,7 @@
 --
 -- Contract: rerank(query, hits, cfg) -> { {index, score}, ... }, err
 
-local cjson   = require("cjson.safe")
+local json    = require("luamemo.json")
 local http    = require("luamemo.http")
 local util    = require("luamemo.util")
 local _common = require("luamemo.rerankers._common")
@@ -39,7 +39,7 @@ function M.rerank(query, hits, cfg)
     local url = cfg.rerank_url
     if not url then return nil, "openai.rerank: rerank_url not set" end
 
-    local req_body = cjson.encode({
+    local req_body = json.encode({
         model           = cfg.rerank_model or "gpt-4o-mini",
         messages        = build_messages(query, hits),
         temperature     = 0.0,
@@ -56,7 +56,7 @@ function M.rerank(query, hits, cfg)
     local ok, herr = util.check_http(status, body, err, "openai.rerank")
     if not ok then return nil, herr end
 
-    local payload = cjson.decode(body)
+    local payload = json.decode(body)
     if not payload or not payload.choices or not payload.choices[1] then
         return nil, "openai.rerank: malformed response"
     end
@@ -65,7 +65,7 @@ function M.rerank(query, hits, cfg)
     if type(content) ~= "string" then
         return nil, "openai.rerank: missing message.content"
     end
-    local parsed = cjson.decode(content)
+    local parsed = json.decode(content)
     if type(parsed) ~= "table" or type(parsed.scores) ~= "table" then
         return nil, "openai.rerank: model output not valid JSON {scores:[...]}"
     end

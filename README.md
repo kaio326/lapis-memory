@@ -12,19 +12,21 @@ backend is a pure-Lua brute-force search that runs on any Postgres 15+.
 **Lua-first.** Every component — embedder, store, routes, MCP server,
 summarizer — is written in Lua. "Works in any Lua 5.1+ runtime" means no
 OpenResty, no Node, no Python — but it does not mean zero dependencies.
-Three LuaRocks packages are required:
+Two LuaRocks packages are required:
 
 | Package | Why |
 |---------|-----|
-| `lua-cjson` | JSON encoding/decoding used throughout the library |
 | `pgmoon` | Pure-Lua PostgreSQL driver (no C extension needed) |
 | `luasocket` | HTTP client for embedder calls and `execute_with_secret`; also used by pgmoon for the DB connection outside OpenResty |
 
-`luarocks install luamemo` pulls all three automatically. No C extensions
-beyond what those packages already require. Crypto (AES-256-CBC +
-HMAC-SHA256) is implemented in pure Lua (`luamemo.crypto`) — no
-lua-openssl needed. pgvector is optional — the default backend runs on
-any Postgres 15+.
+`luarocks install luamemo` pulls both automatically. **`lua-cjson` is no
+longer required.** JSON is handled by `luamemo.json`, a portable shim that
+tries `cjson.safe` first (always present in OpenResty / LuaJIT) and falls
+back to the bundled `luamemo.vendor.dkjson` (pure Lua, MIT, zero C deps)
+when cjson is absent. This means install succeeds on minimal Alpine images
+and CI runners without a C compiler. Crypto (AES-256-CBC + HMAC-SHA256)
+is implemented in pure Lua (`luamemo.crypto`) — no lua-openssl needed.
+pgvector is optional — the default backend runs on any Postgres 15+.
 
 ---
 
@@ -110,6 +112,8 @@ any Postgres 15+.
 | Module                              | Role                                            |
 |-------------------------------------|-------------------------------------------------|
 | `luamemo.init`                 | Public entry point. `setup()`, re-exports, `start_background_jobs()`. |
+| `luamemo.json`                 | Portable JSON shim. Tries `cjson.safe` first (present in OpenResty); falls back to bundled `dkjson` 2.5. Single require point for all JSON operations in the library. |
+| `luamemo.vendor.dkjson`        | Bundled dkjson 2.5 (pure Lua, MIT). Used only when `cjson.safe` is unavailable. |
 | `luamemo.store`                | All SQL. Write / get / search / recent / update / delete / dedup / summary replacement. |
 | `luamemo.db`                   | Portable PostgreSQL adapter. Delegates to `lapis.db` under OpenResty; falls back to `pgmoon` in plain Lua 5.1+. All other library modules go through this layer — no direct `lapis.db` dependency. |
 | `luamemo.http`                 | Portable HTTP client. Uses `resty.http` (non-blocking cosockets) under OpenResty; falls back to `socket.http` / `ssl.https` (LuaSocket) in plain Lua 5.1+. Used by embedder adapters, rerankers, and `execute_with_secret`. |
@@ -169,6 +173,16 @@ See “Backends & cost” below for the trade-off.
 
 ---
 ## Upgrading
+
+### 0.2.6 → 0.2.7
+
+Drop-in upgrade — no schema changes, no migrations, no config changes.
+Bump `luarocks install luamemo` to `0.2.7-1`.
+
+`lua-cjson` is no longer a hard dependency. If you have it installed it
+continues to be used automatically (OpenResty always has it built-in).
+If you do not have it, the bundled `dkjson` fallback kicks in transparently.
+You do not need to install or uninstall anything.
 
 ### 0.2.5 → 0.2.6
 

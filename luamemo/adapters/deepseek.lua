@@ -10,7 +10,7 @@
 -- This file is a stub kept for symmetry. Selecting it returns a clear
 -- error directing you at the working alternatives.
 
-local cjson = require("cjson.safe")
+local json = require("luamemo.json")
 
 return {
     extra_headers = {},

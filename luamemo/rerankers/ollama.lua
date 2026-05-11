@@ -12,7 +12,7 @@
 -- A 20-candidate rerank typically costs ~10-15k input tokens + a tiny
 -- output, well within local-model latency budgets.
 
-local cjson   = require("cjson.safe")
+local json    = require("luamemo.json")
 local http    = require("luamemo.http")
 local util    = require("luamemo.util")
 local _common = require("luamemo.rerankers._common")
@@ -41,7 +41,7 @@ function M.rerank(query, hits, cfg)
     local url = cfg.rerank_url
     if not url then return nil, "ollama.rerank: rerank_url not set" end
 
-    local req_body = cjson.encode({
+    local req_body = json.encode({
         model  = cfg.rerank_model or "llama3.2",
         prompt = build_prompt(query, hits),
         stream = false,
@@ -57,11 +57,11 @@ function M.rerank(query, hits, cfg)
     local ok, herr = util.check_http(status, body, err, "ollama.rerank")
     if not ok then return nil, herr end
 
-    local payload = cjson.decode(body)
+    local payload = json.decode(body)
     if not payload or type(payload.response) ~= "string" then
         return nil, "ollama.rerank: missing 'response' field"
     end
-    local parsed = cjson.decode(payload.response)  -- luacheck: ignore
+    local parsed = json.decode(payload.response)  -- luacheck: ignore
     if type(parsed) ~= "table" or type(parsed.scores) ~= "table" then
         return nil, "ollama.rerank: model output not valid JSON {scores:[...]}"
     end

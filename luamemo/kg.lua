@@ -42,7 +42,7 @@
 -- All public functions accept ONE table argument so call-sites stay
 -- self-documenting. The argument table is never mutated.
 
-local cjson = require("cjson.safe")
+local json  = require("luamemo.json")
 local util  = require("luamemo.util")
 
 local M = {}
@@ -86,8 +86,8 @@ end
 -- with explicit nil normalisation for `valid_until` / `source_memory_id`.
 local function row_to_lua(r)
     if not r then return nil end
-    if r.valid_until == cjson.null      then r.valid_until = nil end
-    if r.source_memory_id == cjson.null then r.source_memory_id = nil end
+    if r.valid_until == json.null      then r.valid_until = nil end
+    if r.source_memory_id == json.null then r.source_memory_id = nil end
     return r
 end
 

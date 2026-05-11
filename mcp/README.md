@@ -38,9 +38,12 @@ VS Code "Invalid string length" overflow on very long sessions.
 ## Requirements
 
 - **Lua 5.1+** or **LuaJIT** (whichever is on your `$PATH` as `lua`)
-- **lua-cjson** (`luarocks install lua-cjson`)
 - **PostgreSQL 15+** with the luamemo schema applied (direct-DB mode)
   — or a running `luamemo` HTTP API (HTTP mode)
+
+> `lua-cjson` is **not required**. `luamemo.json` tries it first (it is
+> always present in OpenResty) and falls back to the bundled pure-Lua
+> `dkjson` 2.5 automatically.
 
 > ### `curl` dependency (HTTP mode only)
 > When using `MEMO_URL` (HTTP mode), the MCP server shells out to `curl`
@@ -55,7 +58,6 @@ VS Code "Invalid string length" overflow on very long sessions.
 ```bash
 git clone https://github.com/kaio326/luamemo.git ~/luamemo
 chmod +x ~/luamemo/mcp/server.lua
-luarocks install lua-cjson    # if not already installed
 ```
 
 Verify:

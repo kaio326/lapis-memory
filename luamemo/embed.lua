@@ -8,7 +8,7 @@
 --   - if cfg.embedder_local is set    -> in-process embedder by that name
 --   - else                            -> HTTP adapter by cfg.embedder_adapter
 
-local cjson = require("cjson.safe")
+local json  = require("luamemo.json")
 local util  = require("luamemo.util")
 
 local M = {}
@@ -47,7 +47,7 @@ local function http_embed(text)
     local ok, herr = util.check_http(status, body, err, "embed")
     if not ok then return nil, herr end
 
-    local payload = cjson.decode(body)
+    local payload = json.decode(body)
     if not payload then return nil, "embed: invalid JSON response" end
 
     local vec, vec_err = impl.parse_response(payload, cfg)
@@ -137,7 +137,7 @@ function M.embed_async(text, wait_fn)
     local ok, herr = util.check_http(status, body, err, "embed")
     if not ok then return nil, herr end
 
-    local payload = cjson.decode(body)
+    local payload = json.decode(body)
     if not payload then return nil, "embed: invalid JSON response" end
 
     local vec, vec_err = impl.parse_response(payload, cfg)

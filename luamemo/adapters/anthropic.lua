@@ -12,7 +12,7 @@
 -- When Anthropic releases embeddings, update build_request() / url() /
 -- parse_response() to match their schema and remove the guard below.
 
-local cjson = require("cjson.safe")
+local json = require("luamemo.json")
 
 return {
     extra_headers = {

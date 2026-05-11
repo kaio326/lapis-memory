@@ -34,7 +34,7 @@
 -- Pure-Lua crypto backend — always available, no external packages.
 local _crypto = require("luamemo.crypto")
 
-local cjson = require("cjson.safe")
+local json  = require("luamemo.json")
 local http  = require("luamemo.http")
 local util  = require("luamemo.util")
 
@@ -100,7 +100,7 @@ local function load_store()
     if not raw then
         return { v = 1, secrets = {} }
     end
-    local store, err = cjson.decode(raw)
+    local store, err = json.decode(raw)
     if not store then
         return nil, "secrets: corrupt store file: " .. tostring(err)
     end
@@ -113,7 +113,7 @@ local function save_store(store)
     if not _file_path then
         return nil, "secrets: secrets_file not configured"
     end
-    local data, err = cjson.encode(store)
+    local data, err = json.encode(store)
     if not data then return nil, "secrets: json encode failed: " .. tostring(err) end
     local tmp = _file_path .. ".tmp"
     local f = io.open(tmp, "w")
@@ -337,10 +337,10 @@ function M.store(name, value, description)
 
         store.secrets[name] = {
             ciphertext   = ciphertext,
-            description  = description or (existing and existing.description) or cjson.null,
+            description  = description or (existing and existing.description) or json.null,
             created_at   = (existing and existing.created_at) or now,
             updated_at   = now,
-            last_used_at = (existing and existing.last_used_at) or cjson.null,
+            last_used_at = (existing and existing.last_used_at) or json.null,
             used_count   = (existing and existing.used_count)  or 0,
         }
 

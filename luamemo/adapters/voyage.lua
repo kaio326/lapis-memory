@@ -17,7 +17,7 @@
 --   search queries as "query". The library does not auto-distinguish, so
 --   set this per call by overriding the global embedder if you need it.
 
-local cjson = require("cjson.safe")
+local json = require("luamemo.json")
 
 return {
     extra_headers = {},
@@ -32,7 +32,7 @@ return {
         if cfg.embedder_input_type then
             body.input_type = cfg.embedder_input_type
         end
-        return cjson.encode(body)
+        return json.encode(body)
     end,
 
     parse_response = function(payload, cfg)

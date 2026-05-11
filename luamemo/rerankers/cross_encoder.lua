@@ -26,7 +26,7 @@
 --
 -- Contract: rerank(query, hits, cfg) -> { {index, score}, ... }, err
 
-local cjson = require("cjson.safe")
+local json = require("luamemo.json")
 local http  = require("luamemo.http")
 local util  = require("luamemo.util")
 
@@ -47,7 +47,7 @@ end
 --   1. TEI native:    [{"index":N,"score":F}, ...]
 --   2. Cohere/Jina:   {"results":[{"index":N,"relevance_score":F},...]}
 local function parse_response(body_text)
-    local parsed = cjson.decode(body_text)
+    local parsed = json.decode(body_text)
     if type(parsed) ~= "table" then
         return nil, "cross_encoder: response is not JSON"
     end
@@ -87,7 +87,7 @@ function M.rerank(query, hits, cfg)
     local texts = {}
     for i, h in ipairs(hits) do texts[i] = build_text(h) end
 
-    local req_body = cjson.encode({
+    local req_body = json.encode({
         model      = cfg.rerank_model,   -- nil for TEI; required for Cohere/Jina
         query      = query,
         texts      = texts,              -- TEI key

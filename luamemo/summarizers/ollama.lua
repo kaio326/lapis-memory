@@ -7,7 +7,7 @@
 --
 -- Contract: summarize(memories, cfg) -> { title, body, metadata }, err
 
-local cjson   = require("cjson.safe")
+local json    = require("luamemo.json")
 local http    = require("luamemo.http")
 local util    = require("luamemo.util")
 local _common = require("luamemo.summarizers._common")
@@ -35,7 +35,7 @@ function M.summarize(memories, cfg)
     local url = cfg.summarizer_url
     if not url then return nil, "ollama.summarize: summarizer_url not set" end
 
-    local req_body = cjson.encode({
+    local req_body = json.encode({
         model  = cfg.summarizer_model or "llama3.2",
         prompt = build_prompt(memories),
         stream = false,
@@ -51,11 +51,11 @@ function M.summarize(memories, cfg)
     local ok, herr = util.check_http(status, body, err, "ollama.summarize")
     if not ok then return nil, herr end
 
-    local payload = cjson.decode(body)
+    local payload = json.decode(body)
     if not payload or type(payload.response) ~= "string" then
         return nil, "ollama.summarize: missing 'response' field"
     end
-    local parsed = cjson.decode(payload.response)
+    local parsed = json.decode(payload.response)
     if type(parsed) ~= "table" or not parsed.title or not parsed.body then
         return nil, "ollama.summarize: model output not valid JSON {title,body}"
     end

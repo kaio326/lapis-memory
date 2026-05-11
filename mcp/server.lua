@@ -19,7 +19,7 @@
 --   echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
 --     | MEMO_DB_URL=postgresql://postgres:@127.0.0.1:5432/luamemo lua mcp/server.lua
 
-local cjson = require("cjson.safe")
+local json  = require("luamemo.json")
 local util  = require("luamemo.util")
 
 math.randomseed(os.time() + math.floor(os.clock() * 1e6))
@@ -569,7 +569,7 @@ Prompts.session_start = {
 -- JSON-RPC framing
 -- ===========================================================================
 local function send(msg)
-    local enc = cjson.encode(msg)
+    local enc = json.encode(msg)
     log("<<", enc)
     io.stdout:write(enc, "\n")
     io.stdout:flush()
@@ -640,7 +640,7 @@ Methods["tools/call"] = function(params, _)
         }
     end
 
-    local pretty = cjson.encode(result)
+    local pretty = json.encode(result)
     return {
         isError = false,
         content = { { type = "text", text = pretty } },
@@ -748,7 +748,7 @@ Notifications["notifications/cancelled"]   = function() end
 -- Main loop
 -- ===========================================================================
 local function dispatch(line)
-    local msg, derr = cjson.decode(line)
+    local msg, derr = json.decode(line)
     if not msg then
         log("decode error:", derr, "line:", line)
         return

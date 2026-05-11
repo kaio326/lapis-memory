@@ -4,7 +4,7 @@
 --   embedder_adapter = "ollama"
 --   embedder_model = "nomic-embed-text"   -- via cfg.embedder_model
 
-local cjson = require("cjson.safe")
+local json = require("luamemo.json")
 
 return {
     extra_headers = {},
@@ -21,7 +21,7 @@ return {
         if num_ctx then
             body.options = { num_ctx = num_ctx }
         end
-        return cjson.encode(body)
+        return json.encode(body)
     end,
 
     parse_response = function(payload, cfg)

@@ -25,7 +25,7 @@
 -- need that shape instead, use the existing `openai` adapter with the
 -- TEI URL and pass any string as embedder_model — TEI ignores it.
 
-local cjson = require("cjson.safe")
+local json = require("luamemo.json")
 
 return {
     extra_headers = {},
@@ -33,7 +33,7 @@ return {
     url = function(cfg) return cfg.embedder_url end,
 
     build_request = function(text, cfg)
-        return cjson.encode({ inputs = text })
+        return json.encode({ inputs = text })
     end,
 
     parse_response = function(payload, cfg)
