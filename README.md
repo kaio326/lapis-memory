@@ -10,10 +10,21 @@ backend is a pure-Lua brute-force search that runs on any Postgres 15+.
 > taking on any new runtime services beyond what your app already runs.
 
 **Lua-first.** Every component — embedder, store, routes, MCP server,
-summarizer — is written in Lua. Hard dependencies are PostgreSQL and
-`luasocket` (HTTP outside OpenResty). Crypto (AES-256-CBC + HMAC-SHA256)
-is implemented in pure Lua (`luamemo.crypto`) — no C extension required.
-OpenResty is optional — the library runs in any Lua 5.1+ runtime.
+summarizer — is written in Lua. "Works in any Lua 5.1+ runtime" means no
+OpenResty, no Node, no Python — but it does not mean zero dependencies.
+Three LuaRocks packages are required:
+
+| Package | Why |
+|---------|-----|
+| `lua-cjson` | JSON encoding/decoding used throughout the library |
+| `pgmoon` | Pure-Lua PostgreSQL driver (no C extension needed) |
+| `luasocket` | HTTP client for embedder calls and `execute_with_secret`; also used by pgmoon for the DB connection outside OpenResty |
+
+`luarocks install luamemo` pulls all three automatically. No C extensions
+beyond what those packages already require. Crypto (AES-256-CBC +
+HMAC-SHA256) is implemented in pure Lua (`luamemo.crypto`) — no
+lua-openssl needed. pgvector is optional — the default backend runs on
+any Postgres 15+.
 
 ---
 
