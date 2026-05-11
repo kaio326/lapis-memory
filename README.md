@@ -159,6 +159,13 @@ See “Backends & cost” below for the trade-off.
 ---
 ## Upgrading
 
+### 0.2.5 → 0.2.6
+
+Drop-in upgrade — no schema changes, no migrations, no config changes.
+Bump `luarocks install luamemo` to `0.2.6-1`. The new `memo calibrate`
+phases (schema auto-apply, IDE/MCP detection) and MCP security guidance
+are active automatically after the upgrade.
+
 ### 0.2.4 → 0.2.5
 
 Apply one new migration (adds a composite index — safe to run on a live DB,

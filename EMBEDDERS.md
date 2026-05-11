@@ -54,7 +54,6 @@ docker exec -it ollama ollama pull nomic-embed-text
 
 ```lua
 require("luamemo").setup({
-    db_table         = "lapis_memory",
     embedder_url     = "http://localhost:11434/api/embeddings",
     embedder_adapter = "ollama",
     embedder_model   = "nomic-embed-text",
@@ -109,7 +108,6 @@ and the operator notes are at
 
 ```lua
 require("luamemo").setup({
-    db_table         = "lapis_memory",
     embedder_url     = "http://localhost:8081/embed",
     embedder_adapter = "tei",
     embedder_model   = "BAAI/bge-m3",
@@ -138,7 +136,6 @@ tokens, well-understood quality.
 
 ```lua
 require("luamemo").setup({
-    db_table         = "lapis_memory",
     embedder_url     = "https://api.openai.com/v1/embeddings",
     embedder_adapter = "openai",
     embedder_model   = "text-embedding-3-small",
@@ -243,12 +240,12 @@ If the data is regenerable (test data, scratch scope, etc.):
 
 ```sql
 -- pgvector backend: column type encodes dim, must be re-created
-DROP TABLE lapis_memory;
--- then re-run luamemo/schema_pgvector.sql with the new VECTOR(N)
+DROP TABLE lm_memories;
+-- then re-run luamemo/schema.sql with the new VECTOR(N)
 ```
 
 For the brute-force backend (`REAL[]`) the column has no fixed dim so
-you can just `TRUNCATE lapis_memory` and re-write your data.
+you can just `TRUNCATE lm_memories` and re-write your data.
 
 ### Option B — re-embed in place (preserves data)
 

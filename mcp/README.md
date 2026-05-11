@@ -53,7 +53,7 @@ VS Code "Invalid string length" overflow on very long sessions.
 ## Install
 
 ```bash
-git clone https://github.com/kaio326/lapis-memory.git ~/luamemo
+git clone https://github.com/kaio326/luamemo.git ~/luamemo
 chmod +x ~/luamemo/mcp/server.lua
 luarocks install lua-cjson    # if not already installed
 ```
@@ -244,16 +244,20 @@ The model sees them as two independent tool sets.
 
 ## Troubleshooting
 
-**"MEMO_URL env var is required"** — The `env` block in your client config
-isn't being applied. Check the client's MCP logs (Claude Desktop has a
-`Developer → MCP` panel).
+**"db_url not configured"** (direct-DB mode) — `MEMO_DB_URL` is missing or
+not being passed to the process. Check the `env` block in your client config.
+Claude Desktop has a `Developer → MCP` panel with per-server logs.
 
-**"empty response from server"** — Your `luamemo` API isn't reachable.
-Test with `curl $MEMO_URL/recent` first.
+**"connection refused" / pgmoon error** (direct-DB mode) — PostgreSQL isn't
+reachable at the URL in `MEMO_DB_URL`. Verify the host, port, and credentials
+with `psql "$MEMO_DB_URL" -c 'SELECT 1'`.
 
-**"invalid JSON response"** — The API returned HTML or plain text (likely
-401/403/500). Run with `MEMO_DEBUG=1` and inspect stderr for the raw URL,
-then hit it with `curl` directly.
+**"empty response from server"** (HTTP mode) — Your `luamemo` HTTP API isn't
+reachable. Test with `curl $MEMO_URL/recent` directly.
+
+**"invalid JSON response"** (HTTP mode) — The API returned HTML or plain text
+(likely 401/403/500). Run with `MEMO_DEBUG=1` and inspect stderr for the raw
+request URL, then hit it with `curl` directly.
 
 **Tools don't appear in Claude Desktop** — Confirm `lua` is on the PATH
 seen by Claude (it inherits the *login shell* PATH on macOS, not your
