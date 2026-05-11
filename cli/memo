@@ -664,14 +664,82 @@ _calibrate_mcp_phase() {
     local root="$1" scope="$2"
 
     local lua_bin; lua_bin=$(find_lua) || lua_bin="lua"
-    # Resolve absolute path to mcp/server.lua — prefer relative to this script,
-    # then fall back to the repo root detected by find_lua's package resolution.
     local script_dir; script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local mcp_server="${script_dir}/../mcp/server.lua"
-    # Canonicalise if realpath is available.
-    command -v realpath >/dev/null 2>&1 && mcp_server=$(realpath "$mcp_server" 2>/dev/null || echo "$mcp_server")
+    # Resolve absolute path to mcp/server.lua.
+    # When installed via LuaRocks, this script lands in a bin/ directory and
+    # the naive "${script_dir}/../mcp/server.lua" resolves to a non-existent
+    # path.  We try four strategies in order:
+    #   1. Relative to this script (works in git-repo / dev mode).
+    #   2. luarocks show — asks the installed package manager for the prefix.
+    #   3. find in common LuaRocks tree roots (slow but reliable fallback).
+    #   4. Keep the relative path and warn the user to fix it manually.
+    local mcp_server=""
+    local _rel="${script_dir}/../mcp/server.lua"
+    if [[ -f "$_rel" ]]; then
+        command -v realpath >/dev/null 2>&1 \
+            && mcp_server=$(realpath "$_rel" 2>/dev/null) \
+            || mcp_server="$_rel"
+    fi
+
+    if [[ -z "$mcp_server" ]]; then
+        # Strategy 2: ask luarocks for the install prefix.
+        local _lr_prefix=""
+        for _lr in luarocks-5.1 luarocks; do
+            if command -v "$_lr" >/dev/null 2>&1; then
+                _lr_prefix=$("$_lr" show luamemo 2>/dev/null \
+                    | grep -i "installed in:" | head -1 \
+                    | sed 's/.*[Ii]nstalled in:[[:space:]]*//')
+                [[ -n "$_lr_prefix" ]] && break
+            fi
+        done
+        if [[ -n "$_lr_prefix" ]]; then
+            local _srv
+            _srv=$(find "$_lr_prefix/lib/luarocks" \
+                -path "*/luamemo/*/mcp/server.lua" 2>/dev/null | sort -V | tail -1)
+            [[ -n "$_srv" ]] && mcp_server="$_srv"
+        fi
+    fi
+
+    if [[ -z "$mcp_server" ]]; then
+        # Strategy 3: search common LuaRocks tree roots.
+        local _srv
+        for _prefix in "${HOME}/.luarocks" "/usr/local" "/usr"; do
+            if [[ -d "${_prefix}/lib/luarocks" ]]; then
+                _srv=$(find "${_prefix}/lib/luarocks" -maxdepth 8 \
+                    -path "*/luamemo/*/mcp/server.lua" 2>/dev/null | sort -V | tail -1)
+                if [[ -n "$_srv" ]]; then
+                    mcp_server="$_srv"
+                    break
+                fi
+            fi
+        done
+    fi
+
+    # Strategy 4: fall back to the relative path; warn below if it doesn't exist.
+    [[ -z "$mcp_server" ]] && mcp_server="$_rel"
+
+    # Warn early if the server file still can't be found.
+    if [[ ! -f "$mcp_server" ]]; then
+        echo ""
+        echo "  WARNING: mcp/server.lua not found at:"
+        echo "    $mcp_server"
+        echo "  Edit the 'args' field in the generated config to the correct path."
+        echo "  Typical location: <luarocks-prefix>/lib/luarocks/rocks-5.1/luamemo/<ver>/mcp/server.lua"
+    fi
 
     local db_url="${MEMO_DB_URL:-}"
+
+    # Warn if the URL is empty — a blank MEMO_DB_URL in the generated config
+    # causes the MCP server to silently fail to connect on first use.
+    if [[ -z "$db_url" ]]; then
+        echo ""
+        echo "  WARNING: MEMO_DB_URL is not set."
+        echo "  The generated MCP config will have an empty MEMO_DB_URL and the"
+        echo "  MCP server will fail to connect to Postgres."
+        echo "  Set MEMO_DB_URL before running memo calibrate, or edit the"
+        echo "  env.MEMO_DB_URL field in the generated config manually."
+        echo "  Example: export MEMO_DB_URL=postgresql://user:pass@localhost:5432/luamemo"
+    fi
 
     # Build the MCP server env block (JSON).
     local mcp_env
@@ -805,6 +873,13 @@ _calibrate_mcp_phase() {
     echo "  the /api/memory HTTP routes available to non-MCP clients."
     echo "  For Copilot Agent Mode, Cursor, or Claude Desktop using MEMO_DB_URL,"
     echo "  the MCP server above handles everything — no setup() call required."
+    echo ""
+    echo "  IMPORTANT — verify MEMO_DB_URL for your deployment environment:"
+    echo "  The MCP server connects to Postgres using the MEMO_DB_URL value above."
+    echo "  In Docker deployments 127.0.0.1 is the MCP client host, not the"
+    echo "  container. Use the service name or a host-routable address instead,"
+    echo "  e.g. postgresql://user:pass@db:5432/luamemo"
+    echo "  Update the env.MEMO_DB_URL field in the generated config if needed."
     echo ""
 }
 

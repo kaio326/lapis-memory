@@ -49,8 +49,12 @@ function M.run(argv)
     end
 
     local lm = require("luamemo")
-    if not lm.config or not lm.config.db_table then
-        io.stderr:write("memo doctor: luamemo.setup() has not been called.\n" ..
+    -- lm.config.db_table always has a default value, so it cannot distinguish
+    -- "setup() was called" from "module loaded with defaults".  The reliable
+    -- signal is lm.store.backend(): it returns nil until store.configure()
+    -- completes successfully inside setup().
+    if not lm.store.backend() then
+        io.stderr:write("memo doctor: luamemo.setup() has not been called (or failed).\n" ..
             "  Pass --setup PATH/TO/setup.lua, or invoke from a host app where setup() has run.\n")
         os.exit(1)
     end
@@ -64,7 +68,7 @@ function M.run(argv)
     io.write("memo doctor — corpus health\n")
     io.write("===========================\n")
     io.write(string.format("  table:        %s\n", lm.config.db_table))
-    io.write(string.format("  backend:      %s\n", lm.store.backend()))
+    io.write(string.format("  backend:      %s\n", lm.store.backend() or "?"))
     io.write(string.format("  embedder:     %s (dim=%d)\n",
         lm.config.embedder_local or lm.config.embedder_adapter or "?",
         lm.config.embed_dim or 0))

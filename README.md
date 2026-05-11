@@ -320,6 +320,57 @@ memory.write{
 Alternatively, set the standard `PGHOST` / `PGDATABASE` / `PGUSER` /
 `PGPASSWORD` environment variables and omit the `pg_*` keys entirely.
 
+### 3c. Docker / containerized setup
+
+When your Postgres instance runs in a Docker container, `127.0.0.1` is
+**not** the right host — it resolves to the container running your Lua
+app, not the database container. Set `pg_host` to the service name
+defined in your `docker-compose.yml`:
+
+```lua
+memory.setup({
+    embedder_local = "hash",
+    embed_dim      = 384,
+    auth_fn        = function(self) return self.current_user ~= nil end,
+
+    -- Docker: use the Compose service name, not localhost
+    pg_host     = lapis_cfg.postgres.host,   -- e.g. "db"
+    pg_port     = lapis_cfg.postgres.port or 5432,
+    pg_database = lapis_cfg.postgres.database,
+    pg_user     = lapis_cfg.postgres.user,
+    pg_password = lapis_cfg.postgres.password,
+})
+```
+
+Or set `MEMO_DB_URL=postgresql://user:pass@db:5432/mydb` and `luamemo`
+reads it automatically without any `pg_*` keys. This is also the URL that
+`memo calibrate` writes into the MCP client config — make sure it is
+correct for the network context where the **MCP client** runs (Claude
+Desktop, VS Code, or Cursor), which is typically the Docker host, not
+inside a container.
+
+#### Embedding service on WSL2 with GPU
+
+When running a local embedder such as
+[Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference)
+on WSL2 with a CUDA GPU, two non-obvious flags are required to avoid OOM
+crashes:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 \
+  docker run --gpus all -p 8080:80 \
+  ghcr.io/huggingface/text-embeddings-inference:turing-1.5 \
+  --model-id BAAI/bge-small-en-v1.5 \
+  --dtype float16 \
+  --max-batch-tokens 2048
+```
+
+`--dtype float16` halves VRAM usage; `--max-batch-tokens 2048` prevents a
+single large batch from exhausting memory. Without these, TEI silently
+crashes on the first batch request.
+
+---
+
 That's it. You now have:
 
 | Method | Path                          | Purpose                       |

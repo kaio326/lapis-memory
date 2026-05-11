@@ -133,8 +133,17 @@ function M.setup(opts)
         M.config[k] = v
     end
     if not M.config.embedder_local then
-        assert(M.config.embedder_url,
-            "setup(): either embedder_local or embedder_url is required")
+        if not M.config.embedder_url then
+            local adapter = M.config.embedder_adapter
+            if adapter and adapter ~= "generic" then
+                error(string.format(
+                    "setup(): embedder_adapter = %q is set but embedder_url is nil.\n" ..
+                    "  embedder_adapter selects the HTTP request format; embedder_url is " ..
+                    "still required.\n  Set embedder_url to your %s endpoint URL.",
+                    adapter, adapter))
+            end
+            error("setup(): either embedder_local or embedder_url is required")
+        end
     end
     assert(type(M.config.auth_fn) == "function",
         "setup(): auth_fn must be a function")

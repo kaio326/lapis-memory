@@ -1,6 +1,49 @@
 # Changelog
 
-## 0.2.7 — 2026-05-11
+## 0.2.8 — 2026-05-11
+
+- **`memo doctor` crash fix.**
+  `memo doctor` crashed with `bad argument #2 to 'format' (string expected, got nil)`
+  when `setup()` had not been called, because the setup-guard checked
+  `lm.config.db_table` (which always has a non-nil default). The guard now
+  checks `lm.store.backend()`, which returns `nil` until `store.configure()`
+  completes inside `setup()`. Added `or '?'` on the backend format call as
+  defence-in-depth.
+
+- **Better error when `embedder_adapter` set without `embedder_url`.**
+  Previously `setup()` emitted a generic `"either embedder_local or embedder_url
+  is required"` error even when `embedder_adapter` was set (which looks like a
+  complete config). The error now names the adapter and explains that
+  `embedder_adapter` selects the HTTP request format while `embedder_url` is
+  still required.
+
+- **`memo calibrate` — robust MCP server path resolution.**
+  The generated MCP config contained a broken server path
+  (`/usr/local/bin/../mcp/server.lua`) when luamemo was installed via LuaRocks
+  (the `memo` binary lands in `bin/` far from `mcp/`). Path resolution now
+  tries four strategies in order: (1) relative to the script (dev/git-clone
+  mode), (2) `luarocks show luamemo` install prefix, (3) `find` in common
+  LuaRocks tree roots, (4) the original relative path with a visible warning.
+
+- **`memo calibrate` — warn on empty `MEMO_DB_URL`.**
+  If `MEMO_DB_URL` is unset when `calibrate` runs, the generated MCP config
+  gets an empty connection string and the MCP server silently fails to connect.
+  `calibrate` now warns loudly before writing the config and instructs the
+  operator to set the variable or fix the field manually.
+
+- **`memo calibrate` — Docker/containerized deployment note.**
+  After writing the MCP config, `calibrate` now prints a reminder that
+  `MEMO_DB_URL=postgresql://...@127.0.0.1:...` is wrong inside Docker — the
+  MCP client runs on the host, not in the container, and should use the
+  Compose service name (e.g. `@db:5432`).
+
+- **README — Docker / containerized setup section (§3c).**
+  New section documents `pg_host` and `MEMO_DB_URL` for Docker deployments,
+  including a worked example reading credentials from the Lapis config object.
+  Also documents the WSL2 GPU flags required to avoid OOM crashes with TEI
+  (`--dtype float16`, `--max-batch-tokens 2048`, `CUDA_DEVICE_ORDER`).
+
+
 
 - **`lua-cjson` is now an optional dependency.**
   `luamemo.json` (new module) is a portable JSON shim: it tries `cjson.safe`
