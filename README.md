@@ -932,6 +932,78 @@ them on demand. Survives crashes, devices, and editor bugs.
 
 ---
 
+## Future direction — centralized agent collaboration
+
+The long-term goal for `luamemo` is to serve as the memory backbone for a
+**centralized, organization-wide agent collaboration system**.
+
+The idea: a shared memory store holds the project's design principles,
+architectural decisions, coding conventions, and accumulated context —
+ingested and kept current across the entire team's work. Any agent connected
+to that store, regardless of which developer is driving it, starts with
+the same grounded understanding of the project.
+
+The first concrete application of this is **automated code review**. When a
+developer pushes to the company repository, an agent with deep knowledge of
+the project's memory — its established patterns, past decisions, and known
+constraints — reviews the diff and flags issues directly, before a human
+reviewer ever sees it. Not a generic linter, but a reviewer that knows *why*
+a particular abstraction exists, *what* trade-offs were made when the module
+was designed, and *which* conventions the team has agreed to enforce.
+
+This turns the memory store into shared institutional knowledge that
+persists independently of any individual developer or session.
+
+### Value for individual developers along the way
+
+The collaboration goal is a destination, not a prerequisite. Every component
+built toward it is immediately useful for a single developer working alone:
+
+- **Persistent project memory** — the agent remembers decisions, conventions,
+  and context across all sessions. You never re-explain your architecture.
+- **Cross-session continuity** — `session_start` reconstructs context instantly,
+  so a new chat is as productive as one that has been running for weeks.
+- **Architecture-aware suggestions** — the KG and calibrated memory allow the agent
+  to catch inconsistencies in your own code against your own past decisions, without
+  needing a team or a push event.
+- **Local-first by default** — everything runs on your own Postgres. No cloud account,
+  no shared infrastructure required.
+
+The individual setup is also the natural on-ramp: calibrate a project, use it for
+a while, verify that the memory is accurate and useful — then connect it to a shared
+store when the team is ready.
+
+### Features needed to reach the collaboration goal
+
+The following capabilities will need to be built before the full collaboration system
+is viable. Each is independently useful and will be available as a standalone feature
+regardless of whether the broader collaboration layer is ever adopted:
+
+| Feature | Individual benefit | Collaboration role |
+|---------|-------------------|-------------------|
+| **Commit/diff digestion** — chunking and embedding diffs associated with the relevant code context | Agent understands *what changed* and *why*, grounding its suggestions in actual history | Powers the automated review agent's retrieval for any pushed change |
+| **Privileges layer** — scope-level read/write access control per agent or team | Lets you define which parts of memory the agent can modify vs. only read | Required for safe multi-team, multi-repository shared stores |
+| **Memory invalidation on refactor** — detecting when a large structural change makes old memories stale | Prevents the agent from applying outdated decisions to rewritten modules | Ensures the shared store stays accurate as the project evolves |
+| **Digest scheduling** — periodic re-ingestion triggered by commits or CI events | Keeps individual project memory current without manual `memo calibrate` runs | The automated backbone for keeping the shared store synchronized |
+
+### What is still to be defined
+
+Two components of the collaboration system have no specification yet and are
+actively open for input:
+
+- **Digest method** — how diffs and commits are chunked, embedded, and associated
+  with the relevant memory entries so the review agent retrieves the right context
+  for each changed file or function
+- **Privileges layer** — which agents can read which scopes, which can write,
+  and how organization-level policies are enforced across teams and repositories
+  sharing the same store
+
+These specifications will be driven by real usage. If you are building something
+in this direction, feedback and collaboration are welcome via
+[GitHub Issues](https://github.com/kaio326/luamemo/issues).
+
+---
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
