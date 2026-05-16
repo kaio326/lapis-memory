@@ -1,5 +1,5 @@
 -- dev/init.sql
--- Bootstraps the lapis_memory_dev database for the dev container.
+-- Bootstraps the lm_memories_dev database for the dev container.
 -- Uses the bruteforce (REAL[]) schema — no pgvector extension required,
 -- so a plain postgres:15-alpine image is sufficient.
 -- Inlines all migrations (001-004) as idempotent statements.

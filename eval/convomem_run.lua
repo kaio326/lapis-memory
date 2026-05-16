@@ -39,6 +39,14 @@ local args = {
     rerank          = false,
     rerank_adapter  = "noop",
     rerank_top_n    = 20,
+    -- Default true: consolidation observations are not part of the gold dataset,
+    -- so including them would push actual session rows to lower ranks and produce
+    -- results incomparable to v0.2.x baselines.  Pass --with-observations to opt in
+    -- (implied when --summarizer-model is set).
+    skip_observations = true,
+    skip_temporal     = false,
+    use_timestamps    = true,
+    summarizer_model  = nil,
 }
 do
     local i = 1
@@ -52,8 +60,15 @@ do
         elseif a == "--rerank"   then args.rerank = true; i = i + 1
         elseif a == "--rerank-adapter" then args.rerank_adapter = arg[i + 1]; i = i + 2
         elseif a == "--rerank-top-n"   then args.rerank_top_n = tonumber(arg[i + 1]); i = i + 2
+        elseif a == "--with-observations" then args.skip_observations = false; i = i + 1
+        elseif a == "--skip-temporal"     then args.skip_temporal = true; i = i + 1
+        elseif a == "--no-timestamps"     then args.use_timestamps = false; i = i + 1
+        elseif a == "--summarizer-model"  then args.summarizer_model = arg[i + 1]; i = i + 2
         else io.stderr:write("unknown arg: " .. tostring(a) .. "\n"); os.exit(2) end
     end
+end
+if args.summarizer_model and args.skip_observations then
+    args.skip_observations = false
 end
 args.out = args.out or ("eval/results/convomem_" .. args.embedder
     .. (args.rerank and ("_rerank-" .. args.rerank_adapter) or "") .. ".json")
@@ -101,9 +116,26 @@ elseif args.embedder == "openai" then
     setup_opts.embedder_model   = os.getenv("OPENAI_MODEL") or "text-embedding-3-small"
     setup_opts.embedder_headers = { Authorization = "Bearer " .. key }
     setup_opts.embed_dim        = tonumber(os.getenv("OPENAI_DIM") or "1536")
+elseif args.embedder == "tei" then
+    -- HuggingFace text-embeddings-inference (TEI) sidecar.
+    setup_opts.embedder_url     = os.getenv("TEI_URL")
+        or "http://127.0.0.1:8081/embed"
+    setup_opts.embedder_adapter = "tei"
+    setup_opts.embedder_model   = os.getenv("TEI_MODEL") or "BAAI/bge-m3"
+    setup_opts.embed_dim        = tonumber(os.getenv("TEI_DIM") or "1024")
+    -- CPU TEI can take 30-90 s per request; override the library default.
+    setup_opts.embed_timeout_ms = tonumber(os.getenv("EMBED_TIMEOUT_MS") or "120000")
 else
     io.stderr:write("unknown --embedder: " .. tostring(args.embedder) .. "\n")
     os.exit(2)
+end
+
+-- Summarizer config for consolidation synthesis.
+if args.summarizer_model then
+    setup_opts.summarizer_adapter = "ollama"
+    setup_opts.summarizer_url     = os.getenv("OLLAMA_SUMMARIZER_URL")
+        or "http://127.0.0.1:11434/api/generate"
+    setup_opts.summarizer_model   = args.summarizer_model
 end
 
 memory.setup(setup_opts)
@@ -175,18 +207,23 @@ for ri, r in ipairs(rows) do
 
     local n_haystack = 0
     local batch = {}
-    for sid, turns in convomem.iter_sessions(r) do
+    for sid, turns, date_str in convomem.iter_sessions(r) do
         n_haystack = n_haystack + 1
         local body = convomem.session_to_body(turns)
-        local max_chars = tonumber(os.getenv("EMBED_MAX_CHARS") or "6000")
+        -- Default 0 = no truncation; set EMBED_MAX_CHARS=N for HTTP embedders with context limits.
+        local max_chars = tonumber(os.getenv("EMBED_MAX_CHARS") or "0")
         if max_chars > 0 and #body > max_chars then body = body:sub(1, max_chars) end
-        batch[#batch + 1] = {
+        local item = {
             scope    = scope,
             kind     = "session",
             title    = sid,
             body     = body,
             metadata = { session_id = sid },
         }
+        if args.use_timestamps and date_str then
+            item.created_at = convomem.parse_session_date(date_str)
+        end
+        batch[#batch + 1] = item
     end
 
     local results, batch_err
@@ -218,9 +255,11 @@ for ri, r in ipairs(rows) do
             by_cat[cat] = by_cat[cat] or new_bucket()
 
             local sresults, serr = memory.search({
-                query = qa.question,
-                scope = scope,
-                limit = args.k_max,
+                query              = qa.question,
+                scope              = scope,
+                limit              = args.k_max,
+                skip_observations  = args.skip_observations or nil,
+                skip_temporal      = args.skip_temporal or nil,
             })
             if not sresults then
                 io.stderr:write(("search failed dlg=%s qa=%d: %s\n")

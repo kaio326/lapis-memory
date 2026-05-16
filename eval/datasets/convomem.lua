@@ -60,8 +60,41 @@ function M.load(path)
     return rows
 end
 
---- Iterate (session_id, turns) pairs over a row's `sessions` array.
--- Falls back to `s<index>` when an explicit `session_id` is missing.
+--- Parse a ConvoMem session timestamp string to a Unix epoch (UTC).
+-- Accepts ISO 8601 "YYYY-MM-DDTHH:MM:SS[Z]" and "YYYY-MM-DD HH:MM:SS".
+-- Also accepts bare "YYYY-MM-DD". Returns nil on parse failure or when
+-- the dataset provides no timestamp for this session.
+function M.parse_session_date(s)
+    if type(s) ~= "string" then return nil end
+    -- ISO 8601: "2023-05-20T14:22:00" or "2023-05-20T14:22:00Z"
+    local y, mo, d, h, mi, sec =
+        s:match("(%d%d%d%d)-(%d%d)-(%d%d)[T ](%d%d):(%d%d):(%d%d)")
+    if not y then
+        -- "YYYY-MM-DD HH:MM" (no seconds)
+        y, mo, d, h, mi = s:match("(%d%d%d%d)-(%d%d)-(%d%d)[T ](%d%d):(%d%d)")
+        sec = 0
+    end
+    if not y then
+        -- Bare date "YYYY-MM-DD"
+        y, mo, d = s:match("(%d%d%d%d)-(%d%d)-(%d%d)")
+        h = 0; mi = 0; sec = 0
+    end
+    if not y then return nil end
+    return os.time({
+        year  = tonumber(y),
+        month = tonumber(mo),
+        day   = tonumber(d),
+        hour  = tonumber(h) or 0,
+        min   = tonumber(mi) or 0,
+        sec   = tonumber(sec) or 0,
+    })
+end
+
+--- Iterate (session_id, turns, timestamp_or_nil) pairs over a row's
+-- `sessions` array. Falls back to `s<index>` when an explicit
+-- `session_id` is missing. The optional third return value is the raw
+-- timestamp string from `s.timestamp`; pass it to `parse_session_date()`
+-- to get a Unix epoch for timestamp-replay writes.
 function M.iter_sessions(row)
     local sessions = row.sessions or {}
     local i = 0
@@ -71,7 +104,7 @@ function M.iter_sessions(row)
         if not s then return nil end
         local sid = s.session_id or ("s" .. tostring(i))
         local turns = s.turns or {}
-        return sid, turns
+        return sid, turns, s.timestamp
     end
 end
 

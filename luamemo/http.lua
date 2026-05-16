@@ -95,16 +95,13 @@ local function try_socket(url, opts)
     end
 
     local timeout_s = (opts.timeout_ms or 10000) / 1000
-    -- socket.http and ssl.https both accept a settimeout via the socket object;
-    -- the simplest cross-version approach is create + configure manually.
-    -- For the table-form request, timeout is set on the socket created by the
-    -- module via the `create` field.
-    local socket = require("socket")
-    local function create()
-        local sock = socket.tcp()
-        sock:settimeout(timeout_s)
-        return sock
-    end
+    -- socket.http.TIMEOUT is the effective per-operation timeout used by
+    -- socket.http for all socket reads and writes.  The `create`-callback
+    -- settimeout() approach is silently ignored by socket.http (it resets
+    -- the socket timeout internally after create() returns).  We therefore
+    -- set http_mod.TIMEOUT directly for this request and restore it afterwards.
+    local prev_timeout = http_mod.TIMEOUT
+    http_mod.TIMEOUT = timeout_s
 
     local chunks = {}
     local req = {
@@ -112,19 +109,27 @@ local function try_socket(url, opts)
         method = (opts.method or "GET"):upper(),
         headers = headers,
         sink   = ltn12.sink.table(chunks),
-        create = create,
     }
     if req_body then
         req.source = ltn12.source.string(req_body)
     end
 
-    local _, code, _resp_headers, _status = http_mod.request(req)
+    -- NOTE: try_socket is not re-entrant-safe across coroutines — two concurrent
+    -- calls interleaved at a yield point will interfere via http_mod.TIMEOUT.
+    -- Plain Lua is single-threaded so this is safe in normal use; avoid calling
+    -- try_socket concurrently from coroutines.
+    local ok_call, code, _resp_headers, _status = pcall(http_mod.request, req)
+    http_mod.TIMEOUT = prev_timeout  -- restore regardless of outcome or error
+    if not ok_call then
+        return nil, nil, "http: request error: " .. tostring(code)
+    end
+
     if not code then
         return nil, nil, "http: request failed (network error)"
     end
     if type(code) ~= "number" then
         -- socket.http returns the error string as the second return when it
-        -- fails at the transport level (e.g. connection refused).
+        -- fails at the transport level (e.g. "timeout", "connection refused").
         return nil, nil, "http: " .. tostring(code)
     end
 
@@ -248,10 +253,11 @@ function M.request_async(url, opts, wait_fn)
     local raw_hdrs = buf:sub(1, hdr_end - 1)
     local body_buf = buf:sub(hdr_end + 4)
 
-    -- Determine expected body length.
+    -- Determine transfer encoding and expected body length.
     local content_length = tonumber(raw_hdrs:match("[Cc]ontent%-[Ll]ength:%s*(%d+)"))
+    local is_chunked = raw_hdrs:lower():find("transfer%-encoding:%s*chunked") ~= nil
 
-    -- Read remaining body bytes.
+    -- Read remaining raw bytes (shared by both chunked and identity paths).
     while true do
         if content_length and #body_buf >= content_length then break end
         local want = content_length
@@ -273,6 +279,27 @@ function M.request_async(url, opts, wait_fn)
     end
 
     sock:close()
+
+    -- Decode chunked transfer encoding if required.
+    -- Format: <hex-size>\r\n<data>\r\n ... 0\r\n\r\n
+    if is_chunked then
+        local decoded = {}
+        local pos = 1
+        while pos <= #body_buf do
+            -- Read chunk size line (hex digits, optional extensions before \r\n).
+            local size_end = body_buf:find("\r\n", pos, true)
+            if not size_end then break end
+            local size_str = body_buf:sub(pos, size_end - 1):match("^([0-9a-fA-F]+)")
+            local chunk_size = tonumber(size_str, 16)
+            if not chunk_size then break end
+            if chunk_size == 0 then break end  -- terminal chunk
+            pos = size_end + 2
+            decoded[#decoded + 1] = body_buf:sub(pos, pos + chunk_size - 1)
+            pos = pos + chunk_size + 2  -- skip trailing \r\n
+        end
+        body_buf = table.concat(decoded)
+    end
+
     return status_code, body_buf, nil
 end
 

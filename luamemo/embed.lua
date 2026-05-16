@@ -13,6 +13,8 @@ local util  = require("luamemo.util")
 
 local M = {}
 
+local DEFAULT_EMBED_TIMEOUT_MS = 30000  -- fallback when embed_timeout_ms not set by M.setup()
+
 local cfg          = nil
 local impl         = nil   -- module being used
 local impl_is_local = false
@@ -42,7 +44,7 @@ local function http_embed(text)
         method     = "POST",
         body       = req_body,
         headers    = headers,
-        timeout_ms = cfg.embed_timeout_ms or 5000,
+        timeout_ms = cfg.embed_timeout_ms or DEFAULT_EMBED_TIMEOUT_MS,
     })
     local ok, herr = util.check_http(status, body, err, "embed")
     if not ok then return nil, herr end
@@ -132,7 +134,7 @@ function M.embed_async(text, wait_fn)
         method     = "POST",
         body       = req_body,
         headers    = headers,
-        timeout_ms = cfg.embed_timeout_ms or 5000,
+        timeout_ms = cfg.embed_timeout_ms or DEFAULT_EMBED_TIMEOUT_MS,
     }, wait_fn)
     local ok, herr = util.check_http(status, body, err, "embed")
     if not ok then return nil, herr end

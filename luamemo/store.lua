@@ -154,6 +154,17 @@ local RETURN_COLS = "id, scope, kind, title, body, tags, metadata, "
 -- Derive initial tier from importance value (delegates to util).
 local _importance_to_tier = util.importance_to_tier
 
+local DEFAULT_EMBED_TIMEOUT_MS = 30000  -- fallback when embed_timeout_ms not set by M.setup()
+
+-- Trim table `t` to at most `n` entries.  Returns a new table when trimming
+-- is needed, or `t` itself when len(t) <= n (no copy).
+local function _trim(t, n)
+    if #t <= n then return t end
+    local out = {}
+    for i = 1, n do out[i] = t[i] end
+    return out
+end
+
 -- Parse a temporal bound (`since` / `until_`) into a SQL literal expression.
 -- Accepts:
 --   * number  -> Unix epoch seconds, formatted as `to_timestamp(N)`
@@ -348,25 +359,50 @@ function M.write(args)
         tier = _importance_to_tier(importance)
     end
 
-    local sql = ([[
-        INSERT INTO %s (scope, kind, title, body, tags, metadata, embedding, importance, decay_rate, was_truncated, tier)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %d)
-        RETURNING %s
-    ]]):format(
-        tbl(),
-        db.escape_literal(scope),
-        db.escape_literal(kind),
-        db.escape_literal(title),
-        db.escape_literal(body),
-        pg_array(tags),
-        as_jsonb(meta),
-        _embed_literal(vec),
-        db.escape_literal(importance),
-        db.escape_literal(decay_rate),
-        db.escape_literal(truncated and true or false),
-        tier,
-        RETURN_COLS
-    )
+    local ts_epoch = tonumber(args.created_at)
+    local sql
+    if ts_epoch then
+        sql = ([[
+            INSERT INTO %s (scope, kind, title, body, tags, metadata, embedding, importance, decay_rate, was_truncated, tier, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %d, to_timestamp(%f), to_timestamp(%f))
+            RETURNING %s
+        ]]):format(
+            tbl(),
+            db.escape_literal(scope),
+            db.escape_literal(kind),
+            db.escape_literal(title),
+            db.escape_literal(body),
+            pg_array(tags),
+            as_jsonb(meta),
+            _embed_literal(vec),
+            db.escape_literal(importance),
+            db.escape_literal(decay_rate),
+            db.escape_literal(truncated and true or false),
+            tier,
+            ts_epoch, ts_epoch,
+            RETURN_COLS
+        )
+    else
+        sql = ([[
+            INSERT INTO %s (scope, kind, title, body, tags, metadata, embedding, importance, decay_rate, was_truncated, tier)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %d)
+            RETURNING %s
+        ]]):format(
+            tbl(),
+            db.escape_literal(scope),
+            db.escape_literal(kind),
+            db.escape_literal(title),
+            db.escape_literal(body),
+            pg_array(tags),
+            as_jsonb(meta),
+            _embed_literal(vec),
+            db.escape_literal(importance),
+            db.escape_literal(decay_rate),
+            db.escape_literal(truncated and true or false),
+            tier,
+            RETURN_COLS
+        )
+    end
     local rows, qerr = db.query(sql)
     if not rows then return nil, "write: db error: " .. tostring(qerr) end
     -- Keep LSH index current when active for this scope.
@@ -459,7 +495,7 @@ function M.write_many(rows_in, opts)
                 return { vec = vec, err = eerr, truncated = vtrunc }
             end
         end
-        local timeout_per = tonumber(cfg.embed_timeout_ms) or 5000
+        local timeout_per = tonumber(cfg.embed_timeout_ms) or DEFAULT_EMBED_TIMEOUT_MS
         local async_results = async.run_all(tasks, timeout_per * #embed_queue + 5000)
         for j, ar in ipairs(async_results) do
             local r = ar.result
@@ -650,6 +686,7 @@ function M.write_many(rows_in, opts)
                     decay_rate = item.decay_rate,
                     truncated  = vtrunc and true or false,
                     tier       = p_tier,
+                    created_at = tonumber(args_i.created_at),
                 }
             end
         end
@@ -662,31 +699,67 @@ function M.write_many(rows_in, opts)
         if prepared[i] then table.insert(indices, i) end
     end
 
+    -- Hoist timestamp check: if any prepared row has a custom created_at, use
+    -- the extended column list for ALL batches (rows without ts fall back to
+    -- CURRENT_TIMESTAMP via ts_expr).  This avoids a per-batch O(batch) scan.
+    local any_ts = false
+    for _, idx in ipairs(indices) do
+        if prepared[idx] and prepared[idx].created_at then
+            any_ts = true; break
+        end
+    end
+    local col_list = any_ts
+        and "scope, kind, title, body, tags, metadata, embedding, importance, decay_rate, was_truncated, tier, created_at, updated_at"
+        or  "scope, kind, title, body, tags, metadata, embedding, importance, decay_rate, was_truncated, tier"
+    local row_fmt = any_ts
+        and "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %d, %s, %s)"
+        or  "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %d)"
+
     local pos = 1
     while pos <= #indices do
         local last = math.min(pos + batch_size - 1, #indices)
         local values = {}
         for j = pos, last do
             local p = prepared[indices[j]]
-            values[#values + 1] = string.format("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %d)",
-                db.escape_literal(p.scope),
-                db.escape_literal(p.kind),
-                db.escape_literal(p.title),
-                db.escape_literal(p.body),
-                pg_array(p.tags),
-                as_jsonb(p.meta),
-                _embed_literal(p.vec),
-                db.escape_literal(p.importance),
-                db.escape_literal(p.decay_rate),
-                db.escape_literal(p.truncated and true or false),
-                p.tier or 1
-            )
+            if any_ts then
+                local ts_expr = p.created_at
+                    and ("to_timestamp(" .. p.created_at .. ")")
+                    or "CURRENT_TIMESTAMP"
+                values[#values + 1] = string.format(row_fmt,
+                    db.escape_literal(p.scope),
+                    db.escape_literal(p.kind),
+                    db.escape_literal(p.title),
+                    db.escape_literal(p.body),
+                    pg_array(p.tags),
+                    as_jsonb(p.meta),
+                    _embed_literal(p.vec),
+                    db.escape_literal(p.importance),
+                    db.escape_literal(p.decay_rate),
+                    db.escape_literal(p.truncated and true or false),
+                    p.tier or 1,
+                    ts_expr, ts_expr
+                )
+            else
+                values[#values + 1] = string.format(row_fmt,
+                    db.escape_literal(p.scope),
+                    db.escape_literal(p.kind),
+                    db.escape_literal(p.title),
+                    db.escape_literal(p.body),
+                    pg_array(p.tags),
+                    as_jsonb(p.meta),
+                    _embed_literal(p.vec),
+                    db.escape_literal(p.importance),
+                    db.escape_literal(p.decay_rate),
+                    db.escape_literal(p.truncated and true or false),
+                    p.tier or 1
+                )
+            end
         end
         local sql = ([[
-            INSERT INTO %s (scope, kind, title, body, tags, metadata, embedding, importance, decay_rate, was_truncated, tier)
+            INSERT INTO %s (%s)
             VALUES %s
             RETURNING %s
-        ]]):format(tbl(), table.concat(values, ", "), RETURN_COLS)
+        ]]):format(tbl(), col_list, table.concat(values, ", "), RETURN_COLS)
         local inserted, qerr = db.query(sql)
         if not inserted then
             -- Whole-chunk failure: tag every slot in this chunk with the
@@ -1462,8 +1535,38 @@ function M.search(args)
         rows = trimmed
     end
 
-    -- Observation search leg: merge observation rows via RRF when not
-    -- explicitly skipped and the table exists.
+    -- Apply reranking (memory rows only — observations are appended afterward
+    -- so they never compete with primary evidence in the reranker).
+    local final_rows
+    if not rerank_on or #rows <= 1 then
+        final_rows = _trim(rows, limit)
+    else
+        -- Lazy-require to avoid a circular dependency at module load.
+        local rerank = require("luamemo.rerank")
+        local reranked, rerr = rerank.rerank(q, rows, {
+            limit             = limit,
+            rerank_top_n      = args.rerank_top_n,
+            rerank_adapter    = args.rerank_adapter,
+            rerank_model      = args.rerank_model,
+            rerank_url        = args.rerank_url,
+            rerank_headers    = args.rerank_headers,
+            rerank_timeout_ms = args.rerank_timeout_ms,
+        })
+        if not reranked then
+            -- Rerank is best-effort: on adapter failure, fall back to the
+            -- baseline ranking so search() never returns nothing.
+            if ngx and ngx.log and ngx.WARN then
+                ngx.log(ngx.WARN, "luamemo rerank failed: ", tostring(rerr))
+            end
+            final_rows = _trim(rows, limit)
+        else
+            final_rows = reranked
+        end
+    end
+
+    -- Observation supplement: run any pending consolidation, then slot-append
+    -- up to obs_max_slots observation rows AFTER all memory/reranked results.
+    -- Observations never displace primary evidence from the top positions.
     if not args.skip_observations then
         -- Run any pending consolidation for this scope so results are fresh.
         if consolidate.pending(scope or "") then
@@ -1471,50 +1574,15 @@ function M.search(args)
         end
         local obs_rows = consolidate.search(scope or "", qvec, rrf_fetch)
         if #obs_rows > 0 then
-            rows = temporal.rrf_merge({ rows, obs_rows })
-            -- Re-trim after merge.
-            if #rows > fetch_limit then
-                local trimmed = {}
-                for i = 1, fetch_limit do trimmed[i] = rows[i] end
-                rows = trimmed
+            local obs_max = tonumber(args.obs_max_slots)
+                or tonumber(cfg.obs_max_slots) or 3
+            for i = 1, math.min(obs_max, #obs_rows) do
+                final_rows[#final_rows + 1] = obs_rows[i]
             end
         end
     end
 
-    if not rerank_on or #rows <= 1 then
-        if #rows > limit then
-            local trimmed = {}
-            for i = 1, limit do trimmed[i] = rows[i] end
-            return trimmed
-        end
-        return rows
-    end
-
-    -- Lazy-require to avoid a circular dependency at module load.
-    local rerank = require("luamemo.rerank")
-    local reranked, rerr = rerank.rerank(q, rows, {
-        limit             = limit,
-        rerank_top_n      = args.rerank_top_n,
-        rerank_adapter    = args.rerank_adapter,
-        rerank_model      = args.rerank_model,
-        rerank_url        = args.rerank_url,
-        rerank_headers    = args.rerank_headers,
-        rerank_timeout_ms = args.rerank_timeout_ms,
-    })
-    if not reranked then
-        -- Rerank is best-effort: on adapter failure, fall back to the
-        -- baseline ranking so search() never returns nothing.
-        if ngx and ngx.log and ngx.WARN then
-            ngx.log(ngx.WARN, "luamemo rerank failed: ", tostring(rerr))
-        end
-        if #rows > limit then
-            local trimmed = {}
-            for i = 1, limit do trimmed[i] = rows[i] end
-            return trimmed
-        end
-        return rows
-    end
-    return reranked
+    return final_rows
 end
 
 return M

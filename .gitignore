@@ -15,5 +15,6 @@ dev/.env
 # Local secrets — never commit
 .github/
 secrets/
+research/
 .env
 .env.backup

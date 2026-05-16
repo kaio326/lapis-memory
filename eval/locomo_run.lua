@@ -42,6 +42,12 @@ local args = {
     rerank          = false,
     rerank_adapter  = "noop",
     rerank_top_n    = 20,
+    -- Default true: consolidation observations are not part of the gold dataset.
+    -- Pass --with-observations to opt in (implied when --summarizer-model is set).
+    skip_observations = true,
+    skip_temporal     = false,
+    use_timestamps    = true,
+    summarizer_model  = nil,
 }
 do
     local i = 1
@@ -55,8 +61,16 @@ do
         elseif a == "--rerank"   then args.rerank = true; i = i + 1
         elseif a == "--rerank-adapter" then args.rerank_adapter = arg[i + 1]; i = i + 2
         elseif a == "--rerank-top-n"   then args.rerank_top_n = tonumber(arg[i + 1]); i = i + 2
+        elseif a == "--with-observations"  then args.skip_observations = false; i = i + 1
+        elseif a == "--skip-observations"   then args.skip_observations = true; i = i + 1
+        elseif a == "--skip-temporal"     then args.skip_temporal = true; i = i + 1
+        elseif a == "--no-timestamps"     then args.use_timestamps = false; i = i + 1
+        elseif a == "--summarizer-model"  then args.summarizer_model = arg[i + 1]; i = i + 2
         else io.stderr:write("unknown arg: " .. tostring(a) .. "\n"); os.exit(2) end
     end
+end
+if args.summarizer_model and args.skip_observations then
+    args.skip_observations = false
 end
 args.out = args.out or ("eval/results/locomo_" .. args.embedder
     .. (args.rerank and ("_rerank-" .. args.rerank_adapter) or "") .. ".json")
@@ -100,6 +114,8 @@ elseif args.embedder == "tei" then
     setup_opts.embedder_adapter = "tei"
     setup_opts.embedder_model   = os.getenv("TEI_MODEL") or "BAAI/bge-m3"
     setup_opts.embed_dim        = tonumber(os.getenv("TEI_DIM") or "1024")
+    -- CPU TEI can take 30-90 s per request; override the library default.
+    setup_opts.embed_timeout_ms = tonumber(os.getenv("EMBED_TIMEOUT_MS") or "120000")
 elseif args.embedder == "openai" then
     local key = os.getenv("OPENAI_API_KEY")
     if not key or key == "" then
@@ -115,6 +131,14 @@ elseif args.embedder == "openai" then
 else
     io.stderr:write("unknown --embedder: " .. tostring(args.embedder) .. "\n")
     os.exit(2)
+end
+
+-- Summarizer config for consolidation synthesis.
+if args.summarizer_model then
+    setup_opts.summarizer_adapter = "ollama"
+    setup_opts.summarizer_url     = os.getenv("OLLAMA_SUMMARIZER_URL")
+        or "http://127.0.0.1:11434/api/generate"
+    setup_opts.summarizer_model   = args.summarizer_model
 end
 
 memory.setup(setup_opts)
@@ -188,21 +212,42 @@ for ri, r in ipairs(rows) do
 
     -- 1. wipe + ingest haystack once per sample
     db.query("DELETE FROM lm_memories WHERE scope = " .. db.escape_literal(scope))
+    db.query("DELETE FROM lm_observations WHERE scope = " .. db.escape_literal(scope))
+    db.query("DELETE FROM lm_reinforcements WHERE scope = " .. db.escape_literal(scope))
 
     local n_haystack = 0
     local batch = {}
-    for sid, turns in locomo.iter_sessions(r) do
+    for sid, turns, date_str in locomo.iter_sessions(r) do
         n_haystack = n_haystack + 1
         local body = locomo.session_to_body(turns)
-        local max_chars = tonumber(os.getenv("EMBED_MAX_CHARS") or "6000")
-        if max_chars > 0 and #body > max_chars then body = body:sub(1, max_chars) end
-        batch[#batch + 1] = {
+        -- Default 0 = no truncation; set EMBED_MAX_CHARS=N to cap for HTTP embedders.
+        local max_chars = tonumber(os.getenv("EMBED_MAX_CHARS") or "0")
+        if max_chars > 0 and #body > max_chars then
+            body = body:sub(1, max_chars)
+            -- Trim any trailing incomplete UTF-8 sequence at the cut boundary.
+            local n = #body
+            local trail = 0
+            while n - trail > 0 do
+                local b = body:byte(n - trail)
+                if b < 0x80 or b >= 0xC0 then break end
+                trail = trail + 1
+            end
+            local lead_pos = n - trail
+            local lead     = lead_pos > 0 and body:byte(lead_pos) or 0
+            local needed   = (lead >= 0xF0 and 3) or (lead >= 0xE0 and 2) or (lead >= 0xC0 and 1) or 0
+            if needed > 0 and trail < needed then body = body:sub(1, lead_pos - 1) end
+        end
+        local item = {
             scope    = scope,
             kind     = "session",
             title    = sid,
             body     = body,
             metadata = { session_id = sid },
         }
+        if args.use_timestamps and date_str then
+            item.created_at = locomo.parse_session_date(date_str)
+        end
+        batch[#batch + 1] = item
     end
 
     local results, batch_err
@@ -237,9 +282,11 @@ for ri, r in ipairs(rows) do
             by_cat[cat] = by_cat[cat] or new_bucket()
 
             local sresults, serr = memory.search({
-                query = qa.question,
-                scope = scope,
-                limit = args.k_max,
+                query              = qa.question,
+                scope              = scope,
+                limit              = args.k_max,
+                skip_observations  = args.skip_observations or nil,
+                skip_temporal      = args.skip_temporal or nil,
             })
             if not sresults then
                 io.stderr:write(("search failed sample=%s qa=%d: %s\n")

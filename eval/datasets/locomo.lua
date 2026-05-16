@@ -43,6 +43,28 @@ local cjson = require("cjson.safe")
 
 local M = {}
 
+local MONTH_NAMES = {
+    january=1, february=2, march=3, april=4, may=5, june=6,
+    july=7, august=8, september=9, october=10, november=11, december=12,
+}
+
+--- Parse a LoCoMo session date string to a Unix epoch (UTC).
+-- Accepts format: "1:56 pm on 8 May, 2023" (case-insensitive month).
+-- Returns nil on parse failure.
+function M.parse_session_date(s)
+    if type(s) ~= "string" then return nil end
+    local h, m, ampm, day, mon_name, year =
+        s:match("(%d+):(%d+)%s+([aApP][mM])%s+on%s+(%d+)%s+(%a+),?%s+(%d+)")
+    if not h then return nil end
+    h = tonumber(h); m = tonumber(m); day = tonumber(day); year = tonumber(year)
+    local month = MONTH_NAMES[mon_name:lower()]
+    if not month then return nil end
+    local lo = ampm:lower()
+    if lo == "pm" and h ~= 12 then h = h + 12
+    elseif lo == "am" and h == 12 then h = 0 end
+    return os.time({ year=year, month=month, day=day, hour=h, min=m, sec=0 })
+end
+
 --- Read & decode the dataset file.
 function M.load(path)
     assert(path, "locomo.load: path required")
@@ -67,8 +89,11 @@ function M.session_no_from_dia_id(dia_id)
 end
 
 --- Iterate session_id, turns over a row's `conversation` table.
--- Yields `("session_<n>", turns_array)` for every key matching `session_<n>`,
--- in numeric order. Skips `*_date_time` sibling keys.
+-- Yields `("session_<n>", turns_array, date_string_or_nil)` for every
+-- key matching `session_<n>`, in numeric order. Skips `*_date_time`
+-- sibling keys. The `date_string` value is the raw "1:56 pm on 8 May,
+-- 2023" string from the dataset; pass it to `parse_session_date()` to
+-- convert to a Unix epoch for timestamp-replay writes.
 function M.iter_sessions(row)
     local conv = row.conversation or {}
     local nums = {}
@@ -81,9 +106,10 @@ function M.iter_sessions(row)
     return function()
         i = i + 1
         if i > #nums then return nil end
-        local n   = nums[i]
-        local sid = "session_" .. tostring(n)
-        return sid, conv[sid]
+        local n        = nums[i]
+        local sid      = "session_" .. tostring(n)
+        local date_str = conv["session_" .. tostring(n) .. "_date_time"]
+        return sid, conv[sid], date_str
     end
 end
 

@@ -238,7 +238,11 @@ rule("last (winter)", function(caps, t)
 end)
 
 -- "in <month name>" → most recent occurrence of that month
-rule("in (january)", function(caps, t)
+-- %f[%a] is a Lua frontier pattern: matches the empty position between a
+-- non-alpha char and an alpha char, ensuring "in" starts a word.  Without
+-- this guard, patterns like "in (mar)" match inside "gin martini" or
+-- "contain 2024", causing false-positive temporal windows.
+rule("%f[%a]in%s+(january)", function(caps, t)
     local mn = MONTH_NUM[caps[1]]
     if not mn then return nil end
     local d = os.date("*t", t)
@@ -251,7 +255,7 @@ for _, mname in ipairs({
     "august","september","october","november","december",
     "jan","feb","mar","apr","jun","jul","aug","sep","oct","nov","dec",
 }) do
-    rule("in (" .. mname .. ")", function(caps, t)
+    rule("%f[%a]in%s+(" .. mname .. ")", function(caps, t)
         local mn = MONTH_NUM[caps[1]]
         if not mn then return nil end
         local d = os.date("*t", t)
@@ -262,7 +266,7 @@ for _, mname in ipairs({
 end
 
 -- "in <4-digit year>"
-rule("in (%d%d%d%d)", function(caps, t)
+rule("%f[%a]in%s+(%d%d%d%d)", function(caps, t)
     local y = tonumber(caps[1])
     if not y or y < 1900 or y > 2100 then return nil end
     return year_window(y)

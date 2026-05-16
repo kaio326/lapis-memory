@@ -23,7 +23,7 @@ M.config = {
     --   "hash" -> luamemo.embedders.hash  (pure Lua, zero deps)
     embedder_local = nil,
     embed_dim      = 384,
-    embed_timeout_ms = 5000,
+    embed_timeout_ms = 30000,
     -- When set, embed.embed() truncates input to this many characters
     -- before sending to the embedder, and flags the row's was_truncated
     -- column. nil = no truncation (historical default). Recommended
@@ -84,6 +84,11 @@ M.config = {
     -- Comfortable up to ~10k-50k memories per scope at 384 dims.
     backend                     = "auto",
     bruteforce_candidate_limit  = 1000,
+    -- Observation supplement slots: how many observation rows (from consolidate.search)
+    -- are appended AFTER memory results when skip_observations=false.
+    -- Observations are never merged into the primary evidence ranking; they
+    -- supplement it. Set to 0 to suppress observations from results entirely.
+    obs_max_slots               = 3,
     -- LLM rerank (Roadmap Item 15.1):
     --   adapter: "noop" (lexical overlap, no network) | "ollama" | "openai"
     --   enabled: when true, every search() runs through the reranker

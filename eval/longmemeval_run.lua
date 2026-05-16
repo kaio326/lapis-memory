@@ -45,6 +45,17 @@ local args = {
     rerank          = false,
     rerank_adapter  = "noop",
     rerank_top_n    = 20,
+    -- Default true: consolidation observations are not part of the gold dataset.
+    -- Pass --with-observations to opt in (implied when --summarizer-model is set).
+    skip_observations = true,
+    skip_temporal     = false,
+    -- Timestamp replay: pass original session dates to store.write_many so
+    -- temporal search sees real time windows instead of today's date.
+    -- Enabled by default; pass --no-timestamps to disable.
+    use_timestamps    = true,
+    -- LLM summarizer for consolidation synthesis (sets summarizer_adapter="ollama").
+    -- nil = noop (fast, no LLM needed). Set to e.g. "llama3.1:8b".
+    summarizer_model  = nil,
 }
 do
     local i = 1
@@ -59,8 +70,18 @@ do
         elseif a == "--rerank-adapter" then args.rerank_adapter = arg[i + 1]; i = i + 2
         elseif a == "--rerank-top-n"   then args.rerank_top_n = tonumber(arg[i + 1]); i = i + 2
         elseif a == "--sweep-weights"  then args.sweep_weights = arg[i + 1]; i = i + 2
+        elseif a == "--with-observations"  then args.skip_observations = false; i = i + 1
+        elseif a == "--skip-observations"   then args.skip_observations = true; i = i + 1
+        elseif a == "--skip-temporal"     then args.skip_temporal = true; i = i + 1
+        elseif a == "--no-timestamps"     then args.use_timestamps = false; i = i + 1
+        elseif a == "--summarizer-model"  then args.summarizer_model = arg[i + 1]; i = i + 2
         else io.stderr:write("unknown arg: " .. tostring(a) .. "\n"); os.exit(2) end
     end
+end
+-- When a real LLM summarizer is configured, enable observations by default
+-- so consolidation synthesis actually runs and contributes to search.
+if args.summarizer_model and args.skip_observations then
+    args.skip_observations = false
 end
 args.out = args.out or ("eval/results/longmemeval_" .. args.embedder
     .. (args.rerank and ("_rerank-" .. args.rerank_adapter) or "")
@@ -131,6 +152,8 @@ elseif args.embedder == "tei" then
     setup_opts.embedder_adapter = "tei"
     setup_opts.embedder_model   = os.getenv("TEI_MODEL") or "BAAI/bge-m3"
     setup_opts.embed_dim        = tonumber(os.getenv("TEI_DIM") or "1024")
+    -- CPU TEI can take 30-90 s per request; override the library default.
+    setup_opts.embed_timeout_ms = tonumber(os.getenv("EMBED_TIMEOUT_MS") or "120000")
 elseif args.embedder == "openai" then
     local key = os.getenv("OPENAI_API_KEY")
     if not key or key == "" then
@@ -146,6 +169,14 @@ elseif args.embedder == "openai" then
 else
     io.stderr:write("unknown --embedder: " .. tostring(args.embedder) .. "\n")
     os.exit(2)
+end
+
+-- Summarizer config for consolidation synthesis (used when --with-observations).
+if args.summarizer_model then
+    setup_opts.summarizer_adapter = "ollama"
+    setup_opts.summarizer_url     = os.getenv("OLLAMA_SUMMARIZER_URL")
+        or "http://127.0.0.1:11434/api/generate"
+    setup_opts.summarizer_model   = args.summarizer_model
 end
 
 memory.setup(setup_opts)
@@ -235,25 +266,60 @@ local t_start      = os.time()
 for qi, q in ipairs(rows) do
     local scope = "lme:" .. args.embedder .. ":" .. tostring(q.question_id)
     db.query("DELETE FROM lm_memories WHERE scope = " .. db.escape_literal(scope))
+    db.query("DELETE FROM lm_observations WHERE scope = " .. db.escape_literal(scope))
+    db.query("DELETE FROM lm_reinforcements WHERE scope = " .. db.escape_literal(scope))
 
     local n_haystack = 0
     local batch = {}
-    for sid, turns in longmemev.iter_sessions(q) do
+    for sid, turns, date_str in longmemev.iter_sessions(q) do
         n_haystack = n_haystack + 1
         local body = longmemev.session_to_body(turns)
         -- Cap body length so embedders with small context windows
         -- (e.g. nomic-embed-text @ 2048 tokens) don't reject long sessions.
-        local max_chars = tonumber(os.getenv("EMBED_MAX_CHARS") or "6000")
+        -- Default 0 = no truncation (matches the original benchmark baseline).
+        -- Set EMBED_MAX_CHARS=N to cap at N chars for HTTP embedders with
+        -- small context windows (e.g. EMBED_MAX_CHARS=6000 for nomic-embed-text).
+        local max_chars = tonumber(os.getenv("EMBED_MAX_CHARS") or "0")
         if max_chars > 0 and #body > max_chars then
             body = body:sub(1, max_chars)
+            -- Trim any incomplete UTF-8 multi-byte sequence at the cut boundary.
+            -- body:sub(1,N) cuts at a byte offset that may fall mid-character
+            -- (e.g. the first two bytes of a 3-byte Korean char).  The trailing
+            -- fragment causes PostgreSQL to reject the whole INSERT batch with
+            -- "invalid byte sequence for encoding UTF8: 0xXX 0x27" (0x27 is the
+            -- pgmoon SQL literal closing-quote that immediately follows).
+            -- Fix: walk back over any trailing continuation bytes to the lead byte,
+            -- then drop the lead + its continuations if the sequence is incomplete.
+            local n = #body
+            local trail = 0
+            while n - trail > 0 do
+                local b = body:byte(n - trail)
+                if b < 0x80 or b >= 0xC0 then break end  -- ASCII or lead byte
+                trail = trail + 1
+            end
+            -- Check whether the multi-byte sequence at n-trail is complete.
+            -- Also handles trail==0 when the last byte is itself a bare lead byte.
+            local lead_pos = n - trail
+            local lead     = lead_pos > 0 and body:byte(lead_pos) or 0
+            local needed   = (lead >= 0xF0 and 3)
+                         or (lead >= 0xE0 and 2)
+                         or (lead >= 0xC0 and 1) or 0
+            if needed > 0 and trail < needed then
+                -- Incomplete sequence: drop the lead byte and its partial continuations.
+                body = body:sub(1, lead_pos - 1)
+            end
         end
-        batch[#batch + 1] = {
+        local item = {
             scope    = scope,
             kind     = "session",
             title    = sid,
             body     = body,
             metadata = { session_id = sid },
         }
+        if args.use_timestamps and date_str then
+            item.created_at = longmemev.parse_session_date(date_str)
+        end
+        batch[#batch + 1] = item
     end
     -- Phase 16.7: batched ingest. Embeds sequentially but compresses N
     -- INSERTs into a single multi-VALUES statement per chunk, removing
@@ -343,9 +409,11 @@ for qi, q in ipairs(rows) do
     else
         -- Standard single-point mode (unchanged).
         local results, serr = memory.search({
-            query = q.question,
-            scope = scope,
-            limit = args.k_max,
+            query              = q.question,
+            scope              = scope,
+            limit              = args.k_max,
+            skip_observations  = args.skip_observations or nil,
+            skip_temporal      = args.skip_temporal or nil,
         })
         if not results then
             io.stderr:write(("search failed for q=%s: %s\n")

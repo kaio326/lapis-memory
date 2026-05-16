@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.3.1 — 2026-05-14
+
+- **`luamemo.temporal` — word-boundary fix for month-name rules.**
+  `rule("in (march)", ...)` previously fired inside any word containing
+  `" in "` followed by a month abbreviation — e.g. `"classic gin martini?"`
+  triggered `"in mar"` (March), and `"contain 2024"` triggered `"in 2024"`.
+  All three `"in <month>"` rules (`january` standalone, the month-name loop,
+  and the 4-digit year rule) now use the Lua frontier pattern `%f[%a]in%s+`
+  to require that `"in"` starts at a word boundary. False-positive temporal
+  windows no longer fire on non-temporal queries.
+  Benchmark impact (LongMemEval n=500, hash embedder): +1.4pp R@10 vs v0.3.0
+  on the skip-temporal ablation; final v0.3.1 result: **79.8% R@10** (vs
+  75.0% in v0.3.0 with both regression causes present; vs 81.0% baseline).
+
+- **`luamemo.http` — chunked transfer-encoding decode in `request_async`.**
+  Ollama's `/api/embeddings` endpoint returns `Transfer-Encoding: chunked`
+  with no `Content-Length`. The v0.3.0 `request_async` path read raw TCP bytes
+  without decoding chunked framing, producing garbled JSON that failed to parse.
+  The synchronous `socket.http` path (used in v0.2.x) handles chunked encoding
+  transparently, which is why the bug was invisible until the async parallel
+  embedding path was introduced. Fix: after reading the full response body,
+  `request_async` now checks for a `Transfer-Encoding: chunked` header and
+  decodes the chunked framing before returning. Impact: 100% of Ollama
+  `write_many` calls silently failed in v0.3.0; all succeed in v0.3.1.
+
+- **Benchmark runners — `skip_observations` defaults to `true`.**
+  `consolidate.process()` (new in v0.3.0) runs during `store.search()` and
+  merges synthesised observation rows into results via RRF. These rows lack
+  `session_id` metadata, so they never match the gold in retrieval benchmarks —
+  but they occupy rank slots, pushing actual session rows down. In ConvoMem's
+  2–3-session scopes this degraded R@1 from ~85% to ~44%. All three benchmark
+  runners (`longmemeval_run.lua`, `locomo_run.lua`, `convomem_run.lua`) now
+  default to `skip_observations = true`. Pass `--with-observations` to opt in.
+
+- **`store.search()` — slot-partitioned observation supplement (precision@1 fix).**
+  The v0.3.0 observation search leg merged observation rows symmetrically with
+  memory rows via RRF. Synthesised observations (distillations of multiple related
+  sessions) scored higher than any single source session and landed at rank 1,
+  collapsing R@1 by 13–45pp across all three eval corpora when `--summarizer-model`
+  was passed. Root cause: RRF treats a rank-1 observation as equal to a rank-1
+  memory, but observations are beliefs — they should never displace primary evidence.
+  Fix: the observation merge is replaced with a **slot-append** — after all memory
+  results are ranked (and reranked if enabled), up to `obs_max_slots` (default 3)
+  observation rows are appended at the end of the result list. Observations
+  supplement but never displace original evidence. New config key: `obs_max_slots`
+  (default 3). Regression smoke: R@1 restored from 51.2% → 100% on 5-question
+  LME sample with `llama3.1:8b` synthesis enabled.
+
+- **`luamemo.http` — `socket.http` timeout now correctly honoured.**
+  The `try_socket()` fallback path previously set the TCP timeout via a `create`
+  callback (`sock:settimeout()`), which `socket.http` silently ignores — it only
+  reads its own `TIMEOUT` module-level global. The fix sets and restores
+  `socket.http.TIMEOUT` (in seconds) around each request, so per-call
+  `opts.timeout_ms` is actually enforced. Without this fix, any embed call that
+  exceeded the library default 10 s TCP-connect grace returned a generic
+  network error instead of a timeout, making the request appear to fail
+  immediately rather than waiting.
+
+- **Default `embed_timeout_ms` raised from 5 000 ms to 30 000 ms.**
+  The previous 5 s default was set for lightweight hash-embedder benchmarks and
+  was far too low for any real HTTP embedder, especially CPU-hosted models.
+  `luamemo.init` default, `luamemo.embed` fallback, and `luamemo.store` async
+  deadline are all updated to 30 000 ms. Users running large models on CPU
+  (e.g. bge-m3 via TEI without a GPU) should override via
+  `setup({ embed_timeout_ms = 120000 })`.
+
 ## 0.3.0 — 2026-05-13
 
 - **`luamemo.temporal` — natural-language temporal retrieval.**

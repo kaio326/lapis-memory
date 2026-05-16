@@ -17,15 +17,30 @@ local memory = require("luamemo")
 local db     = require("luamemo.db")
 
 memory.setup({
-    db_table       = "lm_memories",
-    embedder_local = "hash",
-    embed_dim      = 384,
-    backend        = "auto",
-    default_scope  = "tune_test",
-    auth_fn        = function() return true end,
+    db_table         = "lm_memories",
+    embedder_local   = "hash",
+    embed_dim        = 384,
+    backend          = "auto",
+    default_scope    = "tune_test",
+    dedup_threshold  = 1.1,   -- disable dedup so all 30 seed rows are always inserted
+    auth_fn          = function() return true end,
 })
 
 -- --- arrange --------------------------------------------------------------
+-- Seed 30 rows in the tune_test scope (self-contained; no prior state needed).
+db.query("DELETE FROM lm_memories WHERE scope = 'tune_test'")
+for i = 1, 30 do
+    local row = memory.write({
+        scope = "tune_test",
+        body  = "docker item " .. i .. " automated test entry for temporal smoke",
+        title = "item " .. i,
+    })
+    assert(row and row.id, "seed write failed at i=" .. i)
+end
+local seeded = db.query("SELECT count(*) AS n FROM lm_memories WHERE scope = 'tune_test'")[1]
+assert(tonumber(seeded.n) == 30, "expected 30 seed rows, got " .. tostring(seeded.n))
+print("seeded 30 rows in tune_test")
+
 -- Disable the touch trigger so backdating sticks.
 db.query("ALTER TABLE lm_memories DISABLE TRIGGER lm_memories_touch_updated_at_trg")
 
@@ -58,7 +73,7 @@ local Q = "docker"   -- hash embedder; cap is 1000 by default; FTS uniform.
 
 -- Case 1: no temporal filter -> all 30 pass through (limit defaults to 10
 -- but candidate pool has all 30; we use a high limit for assertion).
-local r1 = assert(memory.search({ query = Q, scope = "tune_test", limit = 100 }))
+local r1 = assert(memory.search({ query = Q, scope = "tune_test", limit = 100, skip_observations = true }))
 print(("case 1: no filter -> %d rows"):format(#r1))
 assert(#r1 == 30, ("expected 30 rows total, got %d"):format(#r1))
 
@@ -66,7 +81,7 @@ assert(#r1 == 30, ("expected 30 rows total, got %d"):format(#r1))
 local thirty_days_ago = os.time() - 30 * 86400
 local r2 = assert(memory.search({
     query = Q, scope = "tune_test", limit = 100,
-    since = thirty_days_ago,
+    since = thirty_days_ago, skip_observations = true,
 }))
 print(("case 2: since=epoch(now-30d) -> %d rows"):format(#r2))
 assert(#r2 == 20, ("expected 20 rows after since-filter, got %d"):format(#r2))
@@ -74,7 +89,7 @@ assert(#r2 == 20, ("expected 20 rows after since-filter, got %d"):format(#r2))
 -- Case 3: until_ = now()-30 days -> ONLY the 10 backdated rows.
 local r3 = assert(memory.search({
     query = Q, scope = "tune_test", limit = 100,
-    until_ = thirty_days_ago,
+    until_ = thirty_days_ago, skip_observations = true,
 }))
 print(("case 3: until_=epoch(now-30d) -> %d rows"):format(#r3))
 assert(#r3 == 10, ("expected 10 rows before until-filter, got %d"):format(#r3))
@@ -83,7 +98,7 @@ assert(#r3 == 10, ("expected 10 rows before until-filter, got %d"):format(#r3))
 local iso = os.date("!%Y-%m-%d", thirty_days_ago)
 local r4 = assert(memory.search({
     query = Q, scope = "tune_test", limit = 100,
-    since = iso,
+    since = iso, skip_observations = true,
 }))
 print(("case 4: since=%q -> %d rows"):format(iso, #r4))
 -- ISO date is at midnight UTC of that day; allow +/-1 row of slop vs. epoch.
@@ -104,6 +119,7 @@ local r6 = assert(memory.search({
     query = Q, scope = "tune_test", limit = 100,
     since  = os.time() - 90 * 86400,
     until_ = os.time() - 30 * 86400,
+    skip_observations = true,
 }))
 print(("case 6: since=90d, until_=30d -> %d rows"):format(#r6))
 assert(#r6 == 10, ("expected 10 rows in [90d, 30d), got %d"):format(#r6))
