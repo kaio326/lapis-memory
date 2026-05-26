@@ -64,7 +64,14 @@ local function _freshness_multiplier(trend)
     return 1.0
 end
 
+-- Compute the offset between local time and UTC once (seconds; positive = east of UTC).
+-- Used by _ts_to_epoch to convert os.time() local-time results to UTC epochs.
+local _tz_offset = os.difftime(os.time(), os.time(os.date("!*t")))
+
 -- Parse a Postgres timestamp string to a Unix epoch (best-effort).
+-- Postgres stores timestamps as UTC; os.time() interprets the table as local
+-- time (returning a UTC epoch that is off by the local timezone offset).
+-- Adding _tz_offset (positive east of UTC) corrects for that skew.
 local function _ts_to_epoch(s)
     if not s then return 0 end
     local y, mo, d = tostring(s):match("^(%d%d%d%d)-(%d%d)-(%d%d)")
@@ -74,7 +81,7 @@ local function _ts_to_epoch(s)
         month = tonumber(mo),
         day   = tonumber(d),
         hour  = 0, min = 0, sec = 0,
-    })
+    }) + _tz_offset
 end
 
 -- Build a Postgres BIGINT[] literal from a Lua array of integer ids.

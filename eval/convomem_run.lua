@@ -26,7 +26,7 @@
 -- category metrics.
 
 package.path = "./?.lua;./?/init.lua;eval/?.lua;eval/datasets/?.lua;" .. package.path
-package.preload["resty.http"] = function() return require("_resty_http_shim") end
+package.preload["resty.http"] = function() return require("helpers") end
 
 local cjson = require("cjson.safe")
 

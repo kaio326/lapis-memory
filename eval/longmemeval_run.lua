@@ -31,7 +31,7 @@ package.path = "./?.lua;./?/init.lua;eval/?.lua;eval/datasets/?.lua;" .. package
 -- plain lua5.1 (outside OpenResty). Without this, luamemo.http falls
 -- back to socket.http directly which also works, but keeping the shim avoids
 -- a second pcall round-trip inside http.lua.
-package.preload["resty.http"] = function() return require("_resty_http_shim") end
+package.preload["resty.http"] = function() return require("helpers") end
 
 local cjson = require("cjson.safe")
 

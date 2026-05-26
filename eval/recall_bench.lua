@@ -42,7 +42,7 @@ package.path = "./?.lua;./?/init.lua;eval/?.lua;eval/datasets/?.lua;" .. package
 -- Preload a `resty.http` shim so HTTP embedders (Ollama / OpenAI) work
 -- under plain `lua5.1`. The shim wraps LuaSocket; it is NOT loaded when
 -- the embedder is `hash` (no HTTP traffic) and is harmless when unused.
-package.preload["resty.http"] = function() return require("_resty_http_shim") end
+package.preload["resty.http"] = function() return require("helpers") end
 
 local cjson = require("cjson.safe")
 
@@ -127,7 +127,7 @@ local db         = require("luamemo.db")
 local longmemev  = require("longmemeval")
 local paraphrase
 if args.paraphrase ~= "none" then
-    paraphrase = require("paraphrase")
+    paraphrase = require("utils")
 end
 
 -- --- embedder config -----------------------------------------------------

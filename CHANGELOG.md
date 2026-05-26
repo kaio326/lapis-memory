@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.3.3 — 2026-05-25
+
+- **Eval test suite — consolidated smoke tests into 7 grouped files.**
+  All 21 individual `eval/tests/smoke_*.lua` files and `eval/tests/test_bug_fixes.lua`
+  are merged into 7 domain-grouped test files under `eval/tests/`:
+  - `test_pure.lua` — pure-Lua tests (bug fixes, recommend, paraphrase, cross-encoder)
+  - `test_core.lua` — DB-backed core tests (bruteforce, write_many, tiers, promote, decay/dedup/summary)
+  - `test_features.lua` — feature tests (KG, patterns, query boosts, temporal, embed probe)
+  - `test_pipeline.lua` — pipeline tests (consolidate, digest, MCP tools)
+  - `test_convomem.lua` — ConvoMem dataset loader + end-to-end runner smoke
+  - `test_locomo.lua` — LoCoMo dataset loader + end-to-end runner smoke
+  - `test_membench.lua` — MemBench dataset loader + integration mini-run
+- **Eval helpers — two shared modules replace three ad-hoc scripts.**
+  `eval/helpers.lua` replaces `eval/_resty_http_shim.lua` (resty.http shim for
+  plain `lua5.1`) and `eval/_make_synthetic.lua` (LongMemEval synthetic-set
+  generator). `eval/utils.lua` replaces `eval/paraphrase.lua` as the
+  deterministic paraphrase generator; both are `require`-able from any eval harness.
+  All runner files (`convomem_run.lua`, `locomo_run.lua`, `longmemeval_run.lua`,
+  `membench_run.lua`, `recall_bench.lua`) updated to use the new names.
+
+- **Bug fixes (carried from v0.3.2 working tree).**
+  - `pg_array()` — backslash / double-quote / single-quote escaping to prevent
+    SQL injection through user-supplied tag values.
+  - SSRF dot-pattern fix in `luamemo.secrets` — `^172%.3[0-1].` corrected to
+    `^172%.3[0-1]%.` so `172.30X0.0` is no longer wrongly blocked.
+  - `_ts_to_epoch()` UTC offset — `os.time({UTC table}) - _tz_offset` had the
+    wrong sign and doubled the error on non-UTC machines (off by 2×tz_offset).
+    Corrected to `+ _tz_offset`; verified on a UTC-5 host that the result equals
+    the known epoch for 2024-01-01 00:00:00 UTC (1704067200). Test updated with
+    a hard correctness assertion.
+  - `_probe_backend()` column-type check — queries `pg_attribute` for the actual
+    `typname` instead of relying on a hard-coded string comparison.
+  - `http.lua request_async` — URL parser now handles IPv6 bracket notation
+    (`http://[::1]:8080/path`); previously all IPv6 embedder URLs failed to parse.
+  - `cli/api.lua` + `mcp/server.lua` — `MEMO_EMBEDDER_ADAPTER` and `MEMO_EMBEDDER`
+    env vars now fall back to defaults when set to an explicit empty string
+    (Lua `""` is truthy, so bare `or "default"` accepted `""`).
+  - `eval/helpers.lua` — `mkdir -p` now single-quote-escapes the output path
+    to prevent shell injection from command-line argument.
+
+
 ## 0.3.2 — 2026-05-15
 
 - **`luamemo.patterns` — new module: preference extraction + query-time boosts.**

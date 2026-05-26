@@ -68,10 +68,23 @@
 
 set -euo pipefail
 
-# Load ~/.memorc if present (simple KEY=VALUE format).
+# Load ~/.memorc if present (global defaults, for backward compatibility).
+# set -a / set +a ensures every KEY=VALUE line is automatically exported so
+# child Lua processes (api.lua, mcp/server.lua) inherit the vars without the
+# caller needing to prefix each line with "export".
+_MEMO_CONFIG_SOURCE=""
 if [[ -f "$HOME/.memorc" ]]; then
     # shellcheck disable=SC1091
-    source "$HOME/.memorc"
+    set -a; source "$HOME/.memorc"; set +a
+    [[ -n "${MEMO_DB_URL:-}" ]] && _MEMO_CONFIG_SOURCE="global"
+fi
+# Load .luamemorc from the current directory — project-local config overrides
+# the global ~/.memorc.  This allows multiple projects on the same machine to
+# each have their own database without interfering with one another.
+if [[ -f "$PWD/.luamemorc" ]]; then
+    # shellcheck disable=SC1091
+    set -a; source "$PWD/.luamemorc"; set +a
+    [[ -n "${MEMO_DB_URL:-}" ]] && _MEMO_CONFIG_SOURCE="local"
 fi
 
 # ---------------------------------------------------------------------------
@@ -839,6 +852,23 @@ _parse_compose_pg() {
 }
 
 # ---------------------------------------------------------------------------
+# Write or replace a KEY=VALUE line in a config file.
+# Creates the file if it does not exist.  If the key already exists it is
+# replaced in-place so the file never accumulates duplicate entries.
+# ---------------------------------------------------------------------------
+_save_rc_key() {
+    local file="$1" key="$2" value="$3"
+    if [[ -f "$file" ]] && grep -q "^${key}=" "$file"; then
+        local tmp; tmp=$(mktemp)
+        grep -v "^${key}=" "$file" > "$tmp" || true
+        printf '%s=%s\n' "$key" "$value" >> "$tmp"
+        mv "$tmp" "$file"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$file"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # memo calibrate — three-phase host probe, corpus health check, codebase ingest.
 # ---------------------------------------------------------------------------
 cmd_calibrate() {
@@ -890,12 +920,21 @@ cmd_calibrate() {
 
     # ── Phase 2: resolve DB connection ──────────────────────────────────────
     # Resolution order (first match wins):
-    #   1. $MEMO_DB_URL already set (from --docker-compose, ~/.memorc, or user)
-    #   2. $DATABASE_URL env var (common 12-factor / Heroku convention)
-    #   3. $POSTGRES_DB + sibling POSTGRES_*/PG* env vars → build MEMO_DB_URL
-    #   4. $PGDATABASE + $PGHOST env vars → build MEMO_DB_URL
-    #   5. Auto-detect docker-compose.yml / docker-compose.yaml in CWD
-    #   6. Prompt once, save to ~/.memorc
+    #   1. $PWD/.luamemorc exists → project already configured, use its URL
+    #   2. $MEMO_DB_URL already set by --docker-compose or explicit env export
+    #   3. $DATABASE_URL env var (common 12-factor / Heroku convention)
+    #   4. $POSTGRES_DB + sibling POSTGRES_*/PG* env vars → build MEMO_DB_URL
+    #   5. $PGDATABASE + $PGHOST env vars → build MEMO_DB_URL
+    #   6. Auto-detect docker-compose.yml / docker-compose.yaml in CWD
+    #   7. Prompt once, save to .luamemorc
+
+    # If no project-local .luamemorc exists yet, do not silently reuse a
+    # MEMO_DB_URL that was inherited from another project's global ~/.memorc.
+    if [[ ! -f "$PWD/.luamemorc" && "${_MEMO_CONFIG_SOURCE:-}" == "global" ]]; then
+        echo "  Note: MEMO_DB_URL is currently set from ~/.memorc (may belong to another project)."
+        echo "  Running DB detection for this project..."
+        unset MEMO_DB_URL
+    fi
 
     if [[ -z "${MEMO_DB_URL:-}" ]]; then
         if [[ -n "${DATABASE_URL:-}" ]]; then
@@ -944,9 +983,10 @@ cmd_calibrate() {
             echo "     Re-run: memo calibrate"
             return 0
         fi
-        printf '\nMEMO_DB_URL=%s\n' "$MEMO_DB_URL" >> "$HOME/.memorc"
+        _save_rc_key "$PWD/.luamemorc" "MEMO_DB_URL" "$MEMO_DB_URL"
         echo ""
-        echo "  Saved to ~/.memorc — future runs need no configuration."
+        echo "  Saved to .luamemorc — future runs in this directory use this database."
+        echo "  Tip: add .luamemorc to .gitignore if the URL contains credentials."
         export MEMO_DB_URL
     fi
 
@@ -1201,6 +1241,16 @@ _calibrate_mcp_phase() {
 
     local db_url="${MEMO_DB_URL:-}"
 
+    # Derive a per-project MCP entry name so multiple projects can coexist in
+    # global Cursor / Claude Desktop configs without overwriting each other.
+    # With a scope set (e.g. "myapp") the key becomes "luamemo-myapp"; without
+    # a scope it falls back to plain "luamemo" for backward compatibility.
+    local mcp_key="luamemo"
+    if [[ -n "${scope:-}" ]]; then
+        local _safe; _safe=$(printf '%s' "$scope" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//;s/-*$//')
+        [[ -n "$_safe" ]] && mcp_key="luamemo-${_safe}"
+    fi
+
     # Warn if the URL is empty — a blank MEMO_DB_URL in the generated config
     # causes the MCP server to silently fail to connect on first use.
     if [[ -z "$db_url" ]]; then
@@ -1214,11 +1264,23 @@ _calibrate_mcp_phase() {
     fi
 
     # Build the MCP server env block (JSON).
+    # Embedder env vars are included only when set so the MCP server config
+    # mirrors exactly what the shell environment provides.
     local mcp_env
     mcp_env=$(jq -n \
-        --arg db  "$db_url" \
-        --arg sc  "$scope" \
-        '{"MEMO_DB_URL": $db, "MEMO_SCOPE": $sc}')
+        --arg db   "$db_url" \
+        --arg sc   "$scope" \
+        --arg eurl "${MEMO_EMBEDDER_URL:-}" \
+        --arg eadp "${MEMO_EMBEDDER_ADAPTER:-}" \
+        --arg emdl "${MEMO_EMBEDDER_MODEL:-}" \
+        --arg edim "${MEMO_EMBED_DIM:-}" \
+        --arg eloc "${MEMO_EMBEDDER:-}" \
+        '{"MEMO_DB_URL": $db, "MEMO_SCOPE": $sc}
+         | if $eurl != "" then . + {"MEMO_EMBEDDER_URL": $eurl} else . end
+         | if $eadp != "" then . + {"MEMO_EMBEDDER_ADAPTER": $eadp} else . end
+         | if $emdl != "" then . + {"MEMO_EMBEDDER_MODEL": $emdl} else . end
+         | if $edim != "" then . + {"MEMO_EMBED_DIM": $edim} else . end
+         | if $eurl == "" and $eloc != "" then . + {"MEMO_EMBEDDER": $eloc} else . end')
 
     # Build the VS Code / Claude Desktop / Cursor MCP entry (JSON).
     local vscode_entry
@@ -1248,27 +1310,27 @@ _calibrate_mcp_phase() {
     if [[ "$has_vscode" == "true" ]]; then
         echo "  Detected: VS Code workspace (.vscode/ found)"
         if [[ -f "$vscode_mcp" ]]; then
-            # Check if luamemo entry already exists.
+            # Check if a luamemo entry already exists under this key.
             local already
-            already=$(jq -r '.servers.luamemo // empty' "$vscode_mcp" 2>/dev/null || echo "")
+            already=$(jq -r --arg key "$mcp_key" '.servers[$key] // empty' "$vscode_mcp" 2>/dev/null || echo "")
             if [[ -n "$already" ]]; then
-                echo "  .vscode/mcp.json: luamemo entry already present — skipping."
+                echo "  .vscode/mcp.json: ${mcp_key} entry already present — skipping."
             else
-                echo -n "  Write luamemo MCP entry to .vscode/mcp.json? [y/N] "
+                echo -n "  Write ${mcp_key} MCP entry to .vscode/mcp.json? [y/N] "
                 local ans; read -r ans
                 if [[ "$ans" =~ ^[Yy]$ ]]; then
                     local updated
-                    updated=$(jq --argjson entry "$vscode_entry" '.servers.luamemo = $entry' "$vscode_mcp")
+                    updated=$(jq --arg key "$mcp_key" --argjson entry "$vscode_entry" '.servers[$key] = $entry' "$vscode_mcp")
                     printf '%s\n' "$updated" > "$vscode_mcp"
                     echo "  Updated: $vscode_mcp"
                 fi
             fi
         else
-            echo -n "  Create .vscode/mcp.json with luamemo entry? [y/N] "
+            echo -n "  Create .vscode/mcp.json with ${mcp_key} entry? [y/N] "
             local ans; read -r ans
             if [[ "$ans" =~ ^[Yy]$ ]]; then
                 mkdir -p "$vscode_dir"
-                jq -n --argjson entry "$vscode_entry" '{"servers":{"luamemo":$entry}}' > "$vscode_mcp"
+                jq -n --arg key "$mcp_key" --argjson entry "$vscode_entry" '{"servers":{($key):$entry}}' > "$vscode_mcp"
                 echo "  Created: $vscode_mcp"
             fi
         fi
@@ -1280,24 +1342,24 @@ _calibrate_mcp_phase() {
         echo "  Detected: Cursor (~/.cursor/ found)"
         if [[ -f "$cursor_mcp" ]]; then
             local already
-            already=$(jq -r '.mcpServers.luamemo // empty' "$cursor_mcp" 2>/dev/null || echo "")
+            already=$(jq -r --arg key "$mcp_key" '.mcpServers[$key] // empty' "$cursor_mcp" 2>/dev/null || echo "")
             if [[ -n "$already" ]]; then
-                echo "  ~/.cursor/mcp.json: luamemo entry already present — skipping."
+                echo "  ~/.cursor/mcp.json: ${mcp_key} entry already present — skipping."
             else
-                echo -n "  Write luamemo MCP entry to ~/.cursor/mcp.json? [y/N] "
+                echo -n "  Write ${mcp_key} MCP entry to ~/.cursor/mcp.json? [y/N] "
                 local ans; read -r ans
                 if [[ "$ans" =~ ^[Yy]$ ]]; then
                     local updated
-                    updated=$(jq --argjson entry "$claude_entry" '.mcpServers.luamemo = $entry' "$cursor_mcp")
+                    updated=$(jq --arg key "$mcp_key" --argjson entry "$claude_entry" '.mcpServers[$key] = $entry' "$cursor_mcp")
                     printf '%s\n' "$updated" > "$cursor_mcp"
                     echo "  Updated: $cursor_mcp"
                 fi
             fi
         else
-            echo -n "  Create ~/.cursor/mcp.json with luamemo entry? [y/N] "
+            echo -n "  Create ~/.cursor/mcp.json with ${mcp_key} entry? [y/N] "
             local ans; read -r ans
             if [[ "$ans" =~ ^[Yy]$ ]]; then
-                jq -n --argjson entry "$claude_entry" '{"mcpServers":{"luamemo":$entry}}' > "$cursor_mcp"
+                jq -n --arg key "$mcp_key" --argjson entry "$claude_entry" '{"mcpServers":{($key):$entry}}' > "$cursor_mcp"
                 echo "  Created: $cursor_mcp"
             fi
         fi
@@ -1313,15 +1375,15 @@ _calibrate_mcp_phase() {
     if [[ -f "$claude_cfg" ]]; then
         echo "  Detected: Claude Desktop (${claude_cfg})"
         local already
-        already=$(jq -r '.mcpServers.luamemo // empty' "$claude_cfg" 2>/dev/null || echo "")
+        already=$(jq -r --arg key "$mcp_key" '.mcpServers[$key] // empty' "$claude_cfg" 2>/dev/null || echo "")
         if [[ -n "$already" ]]; then
-            echo "  claude_desktop_config.json: luamemo entry already present — skipping."
+            echo "  claude_desktop_config.json: ${mcp_key} entry already present — skipping."
         else
-            echo -n "  Write luamemo MCP entry to Claude Desktop config? [y/N] "
+            echo -n "  Write ${mcp_key} MCP entry to Claude Desktop config? [y/N] "
             local ans; read -r ans
             if [[ "$ans" =~ ^[Yy]$ ]]; then
                 local updated
-                updated=$(jq --argjson entry "$claude_entry" '.mcpServers.luamemo = $entry' "$claude_cfg")
+                updated=$(jq --arg key "$mcp_key" --argjson entry "$claude_entry" '.mcpServers[$key] = $entry' "$claude_cfg")
                 printf '%s\n' "$updated" > "$claude_cfg"
                 echo "  Updated: $claude_cfg"
             fi
@@ -1333,10 +1395,10 @@ _calibrate_mcp_phase() {
         echo "  No IDE config detected. Add this to your MCP client config manually:"
         echo ""
         echo "  VS Code (.vscode/mcp.json):"
-        jq -n --argjson entry "$vscode_entry" '{"servers":{"luamemo":$entry}}' | sed 's/^/    /'
+        jq -n --arg key "$mcp_key" --argjson entry "$vscode_entry" '{"servers":{($key):$entry}}' | sed 's/^/    /'
         echo ""
         echo "  Claude Desktop / Cursor (mcpServers block):"
-        jq -n --argjson entry "$claude_entry" '{"mcpServers":{"luamemo":$entry}}' | sed 's/^/    /'
+        jq -n --arg key "$mcp_key" --argjson entry "$claude_entry" '{"mcpServers":{($key):$entry}}' | sed 's/^/    /'
     fi
 
     echo ""
@@ -1497,7 +1559,15 @@ case "$sub" in
     secret-delete)  cmd_secret_delete  "$@" ;;
     secret-execute) cmd_secret_execute "$@" ;;
     migrate) cmd_migrate "$@" ;;
-    ping)    cmd_local_lua ping    "$@" ;;
+    ping)
+        # Show which config file supplied MEMO_DB_URL so the user knows which
+        # database will be checked — critical when multiple projects are present.
+        case "${_MEMO_CONFIG_SOURCE:-}" in
+            local)  echo "[INFO] config: $PWD/.luamemorc" ;;
+            global) echo "[WARN] config: ~/.memorc (global — no .luamemorc in $PWD)" ;;
+            *)      echo "[INFO] config: environment" ;;
+        esac
+        cmd_local_lua ping "$@" ;;
     doctor)  cmd_doctor            "$@" ;;
     -h|--help|help) usage ;;
     *) echo "memo: unknown subcommand: $sub" >&2; usage ;;

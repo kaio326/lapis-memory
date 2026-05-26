@@ -1,3 +1,4 @@
+-- eval/tests/test_convomem.lua
 -- Phase 16.6a smoke test: ConvoMem loader + runner against the tiny
 -- hand-crafted fixture.
 --
@@ -15,7 +16,7 @@
 --     < luamemo/schema_bruteforce.sql
 --
 -- Run:
---   PGHOST=127.0.0.1 PGPORT=5432 lua5.1 eval/smoke_convomem.lua
+--   PGHOST=127.0.0.1 PGPORT=5432 lua5.1 eval/tests/test_convomem.lua
 
 package.path = "./?.lua;./?/init.lua;eval/?.lua;eval/datasets/?.lua;" .. package.path
 
@@ -91,4 +92,4 @@ print(string.format("  overall n=%d  R@1=%.2f  R@5=%.2f  MRR=%.3f",
 assert(report.by_category["factual"] or report.by_category["multi-hop"],
     "by_category did not populate")
 
-print("\nAll Phase 16.6a ConvoMem smoke tests passed.")
+print("\nAll ConvoMem smoke tests passed.")

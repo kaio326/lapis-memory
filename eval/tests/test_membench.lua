@@ -1,5 +1,4 @@
--- eval/smoke_membench.lua
---
+-- eval/tests/test_membench.lua
 -- Fixture-based smoke test for the MemBench evaluation harness.
 --
 -- Uses eval/data/fixtures/membench_tiny.json (3 questions, 2 categories)
@@ -12,10 +11,10 @@
 --
 -- Run:
 --   MEMO_DB_URL=postgresql://postgres:postgres@127.0.0.1:5432/lm_bruteforce_test \
---     lua5.1 eval/smoke_membench.lua
+--     lua5.1 eval/tests/test_membench.lua
 
 package.path = "./?.lua;./?/init.lua;eval/?.lua;eval/datasets/?.lua;" .. package.path
-package.preload["resty.http"] = function() return require("_resty_http_shim") end
+package.preload["resty.http"] = function() return require("helpers") end
 
 local cjson = require("cjson.safe")
 
@@ -80,9 +79,9 @@ check("first session id = sess_a", sids[1] == "sess_a", tostring(sids[1]))
 -- categories
 local cats = membench.categories(data)
 check("categories returns sorted array", type(cats) == "table" and #cats == 3, table.concat(cats, ", "))
-check("categories[1] = 'aggregative'", cats[1] == "aggregative", tostring(cats[1]))
+check("categories[1] = 'aggregative'",      cats[1] == "aggregative",      tostring(cats[1]))
 check("categories[2] = 'knowledge_update'", cats[2] == "knowledge_update", tostring(cats[2]))
-check("categories[3] = 'simple'", cats[3] == "simple", tostring(cats[3]))
+check("categories[3] = 'simple'",           cats[3] == "simple",           tostring(cats[3]))
 
 -- ---------------------------------------------------------------------------
 -- Integration: mini-run through membench_run logic

@@ -1068,3 +1068,31 @@ PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGPASSWORD=postgres \
     --out eval/results/longmemeval_hash_v032.json
 ```
 
+---
+
+## v0.3.3 — bug fixes only, no retrieval delta (2026-05-25)
+
+**Changes vs v0.3.2:** `_ts_to_epoch()` sign corrected (wrong sign in v0.3.2
+working-tree); `http.lua request_async` IPv6 bracket-notation URL parser;
+`cli/api.lua` + `mcp/server.lua` empty env-var guards; `eval/helpers.lua`
+mkdir single-quote escaping; `store.lua` `pg_array()` escaping and
+`_probe_backend()` column-type check; `secrets.lua` SSRF regex dot escape.
+
+**None of these changes affect the bruteforce retrieval path.** `pg_array()`
+only affects tags containing backslashes or quotes (absent in LME corpus).
+`_ts_to_epoch()` is used by `consolidate.lua`, not called during search.
+All other fixes are in non-retrieval code paths.
+
+**Benchmark verdict:** v0.3.2 numbers carry forward unchanged. No new run required.
+
+### v0.3.2 → v0.3.3 delta (hash, standard split)
+
+| metric | v0.3.2 | v0.3.3 | Δ |
+|--------|-------:|-------:|--:|
+| R@1    | 54.0%  | 54.0%  | 0 |
+| R@5    | 73.6%  | 73.6%  | 0 |
+| R@10   | 83.4%  | 83.4%  | 0 |
+| R@20   | 91.4%  | 91.4%  | 0 |
+| MRR    | 0.630  | 0.630  | 0 |
+| miss   | 43     | 43     | 0 |
+

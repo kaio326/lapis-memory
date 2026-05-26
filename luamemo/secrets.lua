@@ -539,7 +539,7 @@ function M.execute_with_secret(name, opts)
             or resolved_ip:match("^192%.168%.")
             or resolved_ip:match("^172%.1[6-9]%.")
             or resolved_ip:match("^172%.2%d%.")
-            or resolved_ip:match("^172%.3[0-1].")
+            or resolved_ip:match("^172%.3[0-1]%.")
         if ip_blocked then
             return nil, "secrets: SSRF blocked: " .. host
                 .. " resolves to disallowed IP " .. resolved_ip

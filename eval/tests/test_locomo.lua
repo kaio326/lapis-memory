@@ -1,3 +1,4 @@
+-- eval/tests/test_locomo.lua
 -- Phase 16.6a smoke test: LoCoMo loader + runner against the tiny
 -- hand-crafted fixture.
 --
@@ -15,7 +16,7 @@
 --     < luamemo/schema_bruteforce.sql
 --
 -- Run:
---   PGHOST=127.0.0.1 PGPORT=5432 lua5.1 eval/smoke_locomo.lua
+--   PGHOST=127.0.0.1 PGPORT=5432 lua5.1 eval/tests/test_locomo.lua
 
 package.path = "./?.lua;./?/init.lua;eval/?.lua;eval/datasets/?.lua;" .. package.path
 
@@ -121,4 +122,4 @@ assert(report.by_category["single-hop"] or report.by_category["temporal"]
     or report.by_category["multi-hop"],
     "by_category did not populate")
 
-print("\nAll Phase 16.6a LoCoMo smoke tests passed.")
+print("\nAll LoCoMo smoke tests passed.")

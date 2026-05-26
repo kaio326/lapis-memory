@@ -161,11 +161,24 @@ function M.request_async(url, opts, wait_fn)
         return M.request(url, opts)
     end
 
-    -- Parse URL into components.
-    local host, port_str, path = url:match("^https?://([^/:?#]+):?(%d*)(/[^%s]*)")
+    -- Parse URL into components. Supports both regular hosts and IPv6 bracket
+    -- notation (e.g. http://[::1]:8080/path).
+    local host, port_str, path
+    -- IPv6: http://[<addr>]:<port><path>  or  http://[<addr>]<path>
+    host, port_str, path = url:match("^https?://%[([^%]]+)%]:(%d+)(/[^%s]*)")
     if not host then
-        -- Try without explicit path.
-        host, port_str = url:match("^https?://([^/:?#]+):?(%d*)$")
+        host, path = url:match("^https?://%[([^%]]+)%](/[^%s]*)")
+    end
+    if not host then
+        -- Regular hostname/IP: http://host:port/path  or  http://host/path
+        host, port_str, path = url:match("^https?://([^/:?#]+):?(%d*)(/[^%s]*)")
+    end
+    if not host then
+        -- Try without explicit path (IPv6 then regular).
+        host, port_str = url:match("^https?://%[([^%]]+)%]:?(%d*)$")
+        if not host then
+            host, port_str = url:match("^https?://([^/:?#]+):?(%d*)$")
+        end
         path = "/"
     end
     if not host then

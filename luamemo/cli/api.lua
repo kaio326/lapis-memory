@@ -52,10 +52,22 @@ local function ensure_setup()
         -- but it sets up config defaults. Silently skip if unavailable.
         return
     end
-    local cfg = {
-        -- Default to the zero-dependency hash embedder; MEMO_EMBEDDER overrides.
-        embedder_local = os.getenv("MEMO_EMBEDDER") or "hash",
-    }
+    local cfg = {}
+    -- Embedder: HTTP embedder takes priority (MEMO_EMBEDDER_URL set).
+    -- Falls back to a local embedder selected by MEMO_EMBEDDER, defaulting to "hash".
+    local embedder_url = os.getenv("MEMO_EMBEDDER_URL")
+    if embedder_url and embedder_url ~= "" then
+        cfg.embedder_url     = embedder_url
+        local ea = os.getenv("MEMO_EMBEDDER_ADAPTER")
+        cfg.embedder_adapter = (ea and ea ~= "") and ea or "generic"
+        local em = os.getenv("MEMO_EMBEDDER_MODEL")
+        if em and em ~= "" then cfg.embedder_model = em end
+    else
+        local el = os.getenv("MEMO_EMBEDDER")
+        cfg.embedder_local = (el and el ~= "") and el or "hash"
+    end
+    local embed_dim = tonumber(os.getenv("MEMO_EMBED_DIM"))
+    if embed_dim then cfg.embed_dim = embed_dim end
     -- Propagate MEMO_DB_URL into config so db.lua can read it from lib_cfg.
     local db_url = os.getenv("MEMO_DB_URL")
     if db_url and db_url ~= "" then cfg.db_url = db_url end
