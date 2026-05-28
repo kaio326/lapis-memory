@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.3.5 — 2026-05-28
+
+- **`memo setup` subcommand.** Creates a `SETUP_CHECK` file in the project root
+  with agent-readable step-by-step first-run verification instructions.  Running
+  `memo calibrate` on a fully-configured project deletes `SETUP_CHECK`
+  automatically.  `--root DIR` sets the target directory; `--force` overwrites an
+  existing file.
+
+- **`memo calibrate` now persists auto-derived `MEMO_DB_URL` to `.luamemorc`.**
+  All four auto-derive paths (`DATABASE_URL`, `POSTGRES_*`, `PG*`, and
+  docker-compose auto-detect) previously set `MEMO_DB_URL` only in the current
+  shell.  After a restart the derive ran again and sometimes selected the wrong
+  database.  All paths now call `_save_rc_key` immediately after deriving the URL,
+  consistent with the existing manual-prompt path.
+
+- **`memo calibrate` now persists probe-recommended embedder config to `.luamemorc`.**
+  The host probe writes a Lua config snippet listing the recommended
+  `embedder_adapter`, `embedder_url`, `embedder_model`, `embed_dim`, and
+  `embed_max_chars`.  All five are now extracted and written to `.luamemorc`
+  using **write-if-absent** semantics: written on the first run from the system
+  recommendation, preserved unchanged on all subsequent runs.  This prevents
+  calibrate from clobbering a working host-side `MEMO_EMBEDDER_URL` with a
+  Docker-internal hostname, and from resetting `MEMO_EMBED_DIM` to 384 when the
+  probe cannot reach the embedder on re-runs.
+
+- **TEI CPU sidecar healthcheck now uses `curl` instead of `wget`.**
+  `eval/sidecars/docker-compose.yml` used `wget -qO-` in both service
+  healthchecks.  `wget` is not present in the TEI CPU image (`cpu-1.7`), causing
+  the healthcheck to always fail.  Changed to `curl -fsS` (already used by the
+  reranker stub in `tei.md`).  Also corrected the remaining `wget` reference
+  inside `eval/sidecars/tei.md`'s standalone compose snippet.
+
+- **VRAM pre-check note added to `eval/sidecars/tei.md`.**
+  Added a `nvidia-smi` command before the "Pull and start" block in the bge-m3
+  embed sidecar section so users know to verify free VRAM (~3 GB) before pulling
+  the GPU image.
+
 ## 0.3.4 — 2026-05-26
 
 - **Bug fix — `memo calibrate` ingest wrote 0 memories.**

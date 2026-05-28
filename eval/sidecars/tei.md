@@ -162,7 +162,7 @@ services:
               count: 1
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:80/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -172,6 +172,10 @@ services:
 Pull and start (standalone compose):
 
 ```bash
+# Verify free VRAM before pulling (bge-m3 needs ~3 GB free).
+nvidia-smi --query-gpu=name,memory.free --format=csv,noheader,nounits 2>/dev/null \
+    || echo "nvidia-smi not available — use the cpu-1.7 image tag instead"
+
 cd luamemo
 docker compose -f eval/sidecars/docker-compose.yml up -d tei-embed
 docker compose -f eval/sidecars/docker-compose.yml logs -f tei-embed   # wait for "Ready"

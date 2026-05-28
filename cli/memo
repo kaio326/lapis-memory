@@ -52,6 +52,11 @@
 #
 #   memo ping       [--db] [--table] [--embedder]   Connectivity check (exit 0/1)
 #
+#   memo setup      [--root DIR] [--force]
+#                   Create SETUP_CHECK in the project root with first-run
+#                   verification instructions for an AI agent. The file is
+#                   deleted automatically when `memo calibrate` succeeds.
+#
 #   memo doctor     [--setup PATH] [--json]
 #                   (corpus health: truncation counts, p95 row size, scale warnings)
 #
@@ -859,16 +864,108 @@ _parse_compose_pg() {
 _save_rc_key() {
     local file="$1" key="$2" value="$3"
     if [[ -f "$file" ]] && grep -q "^${key}=" "$file"; then
-        local tmp; tmp=$(mktemp)
+        local tmp; tmp=$(mktemp "${file}.XXXXXX")
         grep -v "^${key}=" "$file" > "$tmp" || true
         printf '%s=%s\n' "$key" "$value" >> "$tmp"
         mv "$tmp" "$file"
     else
+        [[ ! -f "$file" ]] && (umask 177 && touch "$file")
         printf '%s=%s\n' "$key" "$value" >> "$file"
     fi
 }
 
+# Write key=value only when the key is not already present in the file.
+# Used for probe-recommended embedder vars: on first run they are written from
+# the system recommendation; on subsequent runs the user's values are preserved.
+_save_rc_key_if_absent() {
+    local file="$1" key="$2" value="$3"
+    [[ -f "$file" ]] && grep -q "^${key}=" "$file" && return 0
+    [[ ! -f "$file" ]] && (umask 177 && touch "$file")
+    printf '%s=%s\n' "$key" "$value" >> "$file"
+}
+
+# Save MEMO_DB_URL to .luamemorc and print the standard credential tip.
+_save_db_url_rc() {
+    _save_rc_key "$PWD/.luamemorc" "MEMO_DB_URL" "$1"
+    echo "  Saved to .luamemorc — future runs in this directory use this database."
+    echo "  Tip: add .luamemorc to .gitignore if the URL contains credentials."
+}
+
 # ---------------------------------------------------------------------------
+# memo setup — create SETUP_CHECK for first-run agent-guided verification.
+# ---------------------------------------------------------------------------
+cmd_setup() {
+    local root="." force=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --root)  root="$2"; shift 2 ;;
+            --force) force=true; shift ;;
+            *) echo "memo setup: unknown arg: $1" >&2; exit 1 ;;
+        esac
+    done
+
+    local target; target="${root}/SETUP_CHECK"
+
+    [[ -d "$root" ]] || { echo "memo setup: directory not found: $root" >&2; exit 1; }
+    if [[ -f "$target" ]] && [[ "$force" != true ]]; then
+        echo "memo setup: $target already exists (use --force to overwrite)." >&2
+        echo "  If you are an AI agent, run \`memo calibrate\` to complete setup" >&2
+        echo "  and remove the file automatically." >&2
+        exit 1
+    fi
+
+    cat > "$target" << 'SETUP_EOF'
+luamemo — First-Run Setup Verification
+=======================================
+This file was created by `memo setup`. It will be deleted automatically
+when `memo calibrate` completes successfully. Do not commit this file.
+
+If you are an AI agent, complete these steps in order:
+
+  1. Verify database connectivity and table presence:
+
+         memo ping
+
+     Expected output: three green checks (DB, table, embedder).
+     If the embedder check fails, that is non-fatal — DB and table are required.
+
+  2. Apply schema migrations if the table is missing (idempotent):
+
+         memo migrate | psql "$MEMO_DB_URL"
+
+     Skip this step if `memo ping` reported the table as present.
+     `memo calibrate` will also offer to run migrations automatically.
+
+  3. Run the full setup (host probe, schema validation, codebase ingest,
+     IDE/MCP config detection):
+
+         memo calibrate --scope <your-project-scope>
+
+     Replace <your-project-scope> with a short identifier for this project
+     (e.g. "myapp" or "repo:myproject"). All ingested memories are tagged
+     with this scope so they do not pollute unrelated projects.
+
+  4. Confirm success:
+     `memo calibrate` will print "First-run complete: SETUP_CHECK removed."
+     and delete this file. If the file is still present, calibrate did not
+     finish cleanly — check the output for errors and re-run.
+
+If calibrate fails at any step, fix the reported error and run it again.
+The file will not be deleted until calibrate exits successfully.
+SETUP_EOF
+
+    echo "Created: $target"
+    echo "  Run \`memo calibrate\` to complete setup and remove the file."
+    if [[ -e "${root}/.git" ]]; then
+        local gitignore="${root}/.gitignore"
+        if [[ -f "$gitignore" ]] && grep -qF 'SETUP_CHECK' "$gitignore" 2>/dev/null; then
+            : # already ignored
+        else
+            echo "  Tip: add SETUP_CHECK to your .gitignore so it is not committed."
+        fi
+    fi
+}
+
 # memo calibrate — three-phase host probe, corpus health check, codebase ingest.
 # ---------------------------------------------------------------------------
 cmd_calibrate() {
@@ -904,6 +1001,9 @@ cmd_calibrate() {
     # Apply --docker-compose credentials before probe so they're visible in output.
     if [[ -n "$dc_file" ]]; then
         _parse_compose_pg "$dc_file" || true
+        if [[ -n "${MEMO_DB_URL:-}" ]]; then
+            _save_db_url_rc "$MEMO_DB_URL"
+        fi
     fi
 
     # Run probe. Write config snippet to a temp file so we can extract embed_dim
@@ -911,11 +1011,34 @@ cmd_calibrate() {
     local _probe_tmp; _probe_tmp=$(mktemp /tmp/luamemo_probe_XXXXXX.lua)
     "$lua" -e "require('luamemo.cli.calibrate').run({[==[--root]==],[==[${root}]==],${lua_extra_flags}[==[--write]==],[==[${_probe_tmp}]==]})"
     local _probe_embed_dim=384
+    local _probe_eadp="" _probe_eurl="" _probe_emdl="" _probe_emxc=""
     if [[ -s "$_probe_tmp" ]]; then
-        local _dim_line; _dim_line=$(grep -o 'embed_dim = [0-9]*' "$_probe_tmp" 2>/dev/null | head -1)
-        [[ -n "$_dim_line" ]] && _probe_embed_dim="${_dim_line##*= }"
+        local _awk_out
+        _awk_out=$(awk '
+            /embed_dim[[:space:]]*=[[:space:]]*[0-9]/{match($0,/[0-9]+/);dim=substr($0,RSTART,RLENGTH)}
+            /embedder_adapter[[:space:]]*=/{match($0,/"[^"]*"/);adp=substr($0,RSTART+1,RLENGTH-2)}
+            /embedder_url[[:space:]]*=/{match($0,/"[^"]*"/);url=substr($0,RSTART+1,RLENGTH-2)}
+            /embedder_model[[:space:]]*=/{match($0,/"[^"]*"/);mdl=substr($0,RSTART+1,RLENGTH-2)}
+            /embed_max_chars[[:space:]]*=[[:space:]]*[0-9]/{match($0,/[0-9]+/);mxc=substr($0,RSTART,RLENGTH)}
+            END{printf "%s\t%s\t%s\t%s\t%s\n",dim,adp,url,mdl,mxc}
+        ' "$_probe_tmp")
+        IFS=$'\t' read -r _probe_embed_dim _probe_eadp _probe_eurl _probe_emdl _probe_emxc <<< "$_awk_out"
+        [[ -n "$_probe_embed_dim" ]] || _probe_embed_dim=384
     fi
     rm -f "$_probe_tmp"
+    # Persist probe-recommended embedder config to .luamemorc if DB is already
+    # set (guard: don't create a partial config before DB is configured).
+    # Use "write if absent" semantics so that existing user-configured values
+    # (e.g. a host-side MEMO_EMBEDDER_URL set by a prior docker-compose detect)
+    # are never clobbered by the probe, which just echoes back whatever URL was
+    # already in the environment.
+    if [[ -n "${MEMO_DB_URL:-}" ]]; then
+        [[ -n "$_probe_eadp" ]] && _save_rc_key_if_absent "$PWD/.luamemorc" "MEMO_EMBEDDER_ADAPTER" "$_probe_eadp"
+        [[ -n "$_probe_eurl" ]] && _save_rc_key_if_absent "$PWD/.luamemorc" "MEMO_EMBEDDER_URL"     "$_probe_eurl"
+        [[ -n "$_probe_emdl" ]] && _save_rc_key_if_absent "$PWD/.luamemorc" "MEMO_EMBEDDER_MODEL"   "$_probe_emdl"
+        _save_rc_key_if_absent "$PWD/.luamemorc" "MEMO_EMBED_DIM" "$_probe_embed_dim"
+        [[ -n "$_probe_emxc" ]] && _save_rc_key_if_absent "$PWD/.luamemorc" "MEMO_EMBED_MAX_CHARS"  "$_probe_emxc"
+    fi
     [[ "$probe_only" == true ]] && return 0
 
     # ── Phase 2: resolve DB connection ──────────────────────────────────────
@@ -940,6 +1063,7 @@ cmd_calibrate() {
         if [[ -n "${DATABASE_URL:-}" ]]; then
             export MEMO_DB_URL="$DATABASE_URL"
             echo "  DB: using DATABASE_URL"
+            _save_db_url_rc "$MEMO_DB_URL"
         elif [[ -n "${POSTGRES_DB:-}" ]]; then
             local _pg_user="${POSTGRES_USER:-${PGUSER:-postgres}}"
             local _pg_pass="${POSTGRES_PASSWORD:-${PGPASSWORD:-}}"
@@ -949,6 +1073,7 @@ cmd_calibrate() {
             if _url=$(_build_pg_url "$_pg_user" "$_pg_pass" "$_pg_host" "$_pg_port" "${POSTGRES_DB}"); then
                 export MEMO_DB_URL="$_url"
                 echo "  DB: assembled from POSTGRES_* env vars → ${POSTGRES_DB}"
+                _save_db_url_rc "$MEMO_DB_URL"
             else
                 echo "  Falling back to manual MEMO_DB_URL prompt."
             fi
@@ -961,6 +1086,7 @@ cmd_calibrate() {
             if _url=$(_build_pg_url "$_pg_user" "$_pg_pass" "$_pg_host" "$_pg_port" "${PGDATABASE}"); then
                 export MEMO_DB_URL="$_url"
                 echo "  DB: assembled from PG* env vars → ${PGDATABASE}"
+                _save_db_url_rc "$MEMO_DB_URL"
             else
                 echo "  Falling back to manual MEMO_DB_URL prompt."
             fi
@@ -969,6 +1095,9 @@ cmd_calibrate() {
             [[ -f "docker-compose.yaml" ]] && _dc="docker-compose.yaml"
             echo "  DB: auto-detected $_dc — probing for Postgres config..."
             _parse_compose_pg "$_dc" || true
+            if [[ -n "${MEMO_DB_URL:-}" ]]; then
+                _save_db_url_rc "$MEMO_DB_URL"
+            fi
         fi
     fi
 
@@ -983,10 +1112,8 @@ cmd_calibrate() {
             echo "     Re-run: memo calibrate"
             return 0
         fi
-        _save_rc_key "$PWD/.luamemorc" "MEMO_DB_URL" "$MEMO_DB_URL"
         echo ""
-        echo "  Saved to .luamemorc — future runs in this directory use this database."
-        echo "  Tip: add .luamemorc to .gitignore if the URL contains credentials."
+        _save_db_url_rc "$MEMO_DB_URL"
         export MEMO_DB_URL
     fi
 
@@ -1147,6 +1274,13 @@ cmd_calibrate() {
     # ── Phase 5: IDE detection + MCP config ─────────────────────────────────
     if [[ "${no_mcp:-false}" != "true" ]]; then
         _calibrate_mcp_phase "$root" "$scope"
+    fi
+
+    # ── Cleanup: remove SETUP_CHECK on successful first-run ──────────────────
+    if [[ "$dry_run" != true ]] && [[ -f "${root}/SETUP_CHECK" ]]; then
+        rm -f "${root}/SETUP_CHECK"
+        echo ""
+        echo "  First-run complete: SETUP_CHECK removed."
     fi
 }
 
@@ -1554,6 +1688,7 @@ case "$sub" in
     consolidate) cmd_consolidate "$@" ;;
     digest) cmd_digest "$@" ;;
     calibrate) cmd_calibrate "$@" ;;
+    setup)     cmd_setup     "$@" ;;
     secret-store)   cmd_secret_store   "$@" ;;
     secret-list)    cmd_secret_list         ;;
     secret-delete)  cmd_secret_delete  "$@" ;;
